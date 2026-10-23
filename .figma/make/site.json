@@ -1,0 +1,11 @@
+{
+  "title": "One",
+  "description": "Organize tasks with drag-and-drop timeblocking, track daily briefs, and review progress with cooldowns to boost productivity and focus.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
