@@ -789,7 +789,8 @@ export default function App() {
       return ka === kb ? a.id - b.id : ka < kb ? -1 : 1
     })
   const calDays = [calStart, localDateKey(shiftDate(dateFromKey(calStart), 1))]
-  const scheduled = tasks.filter((t) => t.hour !== undefined && !t.archived)
+  // Archived tasks leave the task list but keep their place on the calendar.
+  const scheduled = tasks.filter((t) => t.hour !== undefined)
   const planned = scheduled
     .filter((t) => t.date && calDays.includes(t.date))
     .reduce((sum, t) => sum + t.duration, 0)
@@ -918,7 +919,9 @@ export default function App() {
   function unschedule(id: number) {
     setTasks((all) =>
       all.map((t) =>
-        t.id === id ? { ...t, hour: undefined, date: undefined } : t,
+        // Taking an archived task off the calendar brings it back to the list,
+        // so it never vanishes from both places at once.
+        t.id === id ? { ...t, hour: undefined, date: undefined, archived: undefined } : t,
       ),
     )
     setToast("Moved back to your task list")
