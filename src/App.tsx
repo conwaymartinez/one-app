@@ -19,6 +19,8 @@ type Task = {
   category?: string
   color?: Color
   completedAt?: string
+  /** Swiped away to the right: hidden from the list and calendar, kept in data. */
+  archived?: boolean
 }
 type DailyReview = { rests: string[]; notes?: Record<string, string> }
 
@@ -194,6 +196,7 @@ function TaskCard({
   edit,
   startDrag,
   dragging,
+  onSwipe,
 }: {
   task: Task
   tag?: Tag
@@ -203,7 +206,74 @@ function TaskCard({
   edit: (task: Task) => void
   startDrag: (e: React.PointerEvent, task: Task) => void
   dragging: boolean
+  /** Touch swipe: left deletes, right archives. */
+  onSwipe: (task: Task, action: "delete" | "archive") => void
 }) {
+  // Finger swipes only; the grip handle still drags onto the calendar and a
+  // mouse still drags the whole card.
+  const [dx, setDx] = useState(0)
+  const [leaving, setLeaving] = useState<-1 | 0 | 1>(0)
+  const swipe = useRef<{
+    pointerId: number
+    x0: number
+    y0: number
+    on: boolean
+    width: number
+  } | null>(null)
+  const swipedAt = useRef(0)
+  const threshold = (width: number) => Math.min(120, width * 0.33)
+  const armed = swipe.current?.on && Math.abs(dx) > threshold(swipe.current.width)
+  function swipeDown(e: React.PointerEvent<HTMLElement>) {
+    startDrag(e, task)
+    const target = e.target as HTMLElement
+    if (e.pointerType === "mouse" || target.closest(".grip") || leaving) return
+    swipe.current = {
+      pointerId: e.pointerId,
+      x0: e.clientX,
+      y0: e.clientY,
+      on: false,
+      width: e.currentTarget.offsetWidth,
+    }
+  }
+  function swipeMove(e: React.PointerEvent<HTMLElement>) {
+    const s = swipe.current
+    if (!s || s.pointerId !== e.pointerId) return
+    const mx = e.clientX - s.x0
+    const my = e.clientY - s.y0
+    if (!s.on) {
+      if (Math.abs(mx) < 10 && Math.abs(my) < 10) return
+      // Mostly vertical: leave it to scrolling.
+      if (Math.abs(my) >= Math.abs(mx)) {
+        swipe.current = null
+        return
+      }
+      s.on = true
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId)
+      } catch {}
+    }
+    const wasArmed = Math.abs(dx) > threshold(s.width)
+    if (Math.abs(mx) > threshold(s.width) !== wasArmed) navigator.vibrate?.(8)
+    setDx(mx)
+  }
+  function swipeEnd(e: React.PointerEvent<HTMLElement>) {
+    const s = swipe.current
+    if (!s || s.pointerId !== e.pointerId) return
+    swipe.current = null
+    if (!s.on) return
+    swipedAt.current = Date.now()
+    if (e.type === "pointerup" && Math.abs(dx) > threshold(s.width)) {
+      const dir = dx < 0 ? -1 : 1
+      setLeaving(dir)
+      window.setTimeout(() => {
+        onSwipe(task, dir < 0 ? "delete" : "archive")
+        setLeaving(0)
+        setDx(0)
+      }, 200)
+    } else setDx(0)
+  }
+  const offset = leaving ? `${leaving * 110}%` : `${dx}px`
+  const active = dx !== 0 || leaving !== 0
   const when =
     task.hour === undefined
       ? null
@@ -211,9 +281,36 @@ function TaskCard({
         ? `${dayName(task.date).slice(0, 3)} ${hourLabel(task.hour)}`
         : hourLabel(task.hour)
   return (
+    <div
+      className={`swipe-row ${active ? "swiping" : ""} ${
+        dx < 0 || leaving < 0 ? "to-delete" : "to-archive"
+      } ${armed || leaving ? "armed" : ""}`}
+    >
+      <div aria-hidden className="swipe-actions">
+        <span className="swipe-archive">Archive</span>
+        <span className="swipe-delete">Delete</span>
+      </div>
     <article
       className={`task-card ${dragging ? "dragging" : ""}`}
-      onPointerDown={(e) => startDrag(e, task)}
+      onClickCapture={(e) => {
+        // A swipe shouldn't also tap the button it started on.
+        if (Date.now() - swipedAt.current < 350) {
+          e.preventDefault()
+          e.stopPropagation()
+        }
+      }}
+      onPointerCancel={swipeEnd}
+      onPointerDown={swipeDown}
+      onPointerMove={swipeMove}
+      onPointerUp={swipeEnd}
+      style={
+        active
+          ? {
+              transform: `translateX(${offset})`,
+              transition: swipe.current?.on ? "none" : "transform .2s ease",
+            }
+          : undefined
+      }
     >
       <span aria-hidden className="grip">
         <Icon name="grip" size={15} />
@@ -264,6 +361,7 @@ function TaskCard({
         <Icon name="calendar" size={16} />
       </button>
     </article>
+    </div>
   )
 }
 
@@ -684,14 +782,14 @@ export default function App() {
   const cooldownDate = todayKey
   // Unscheduled first, then by day and hour.
   const open = tasks
-    .filter((t) => !t.completed)
+    .filter((t) => !t.completed && !t.archived)
     .sort((a, b) => {
       const ka = a.hour === undefined ? "" : `${a.date}-${String(a.hour).padStart(2, "0")}`
       const kb = b.hour === undefined ? "" : `${b.date}-${String(b.hour).padStart(2, "0")}`
       return ka === kb ? a.id - b.id : ka < kb ? -1 : 1
     })
   const calDays = [calStart, localDateKey(shiftDate(dateFromKey(calStart), 1))]
-  const scheduled = tasks.filter((t) => t.hour !== undefined)
+  const scheduled = tasks.filter((t) => t.hour !== undefined && !t.archived)
   const planned = scheduled
     .filter((t) => t.date && calDays.includes(t.date))
     .reduce((sum, t) => sum + t.duration, 0)
@@ -793,6 +891,16 @@ export default function App() {
     setTasks((all) => all.filter((t) => t.id !== id))
     setEditTask(null)
     showUndo(`Deleted: ${task.title}`, () => setTasks((all) => [...all, task]))
+  }
+  function archiveTask(id: number) {
+    const task = tasks.find((t) => t.id === id)
+    if (!task) return
+    setTasks((all) => all.map((t) => (t.id === id ? { ...t, archived: true } : t)))
+    showUndo(`Archived: ${task.title}`, () =>
+      setTasks((all) =>
+        all.map((t) => (t.id === id ? { ...t, archived: undefined } : t)),
+      ),
+    )
   }
   function schedule(id: number, dateKey: string, hour: number) {
     const task = tasks.find((t) => t.id === id)
@@ -1301,7 +1409,8 @@ export default function App() {
               </form>
               <p className="hint">
                 <Icon name="sparkle" size={14} /> Drag a task by its handle onto
-                the calendar. Outlined hours only take their own project.
+                the calendar. Outlined hours only take their own project. Swipe
+                left to delete, right to archive.
               </p>
               <div className="task-list">
                 {open.map((t) => (
@@ -1314,6 +1423,9 @@ export default function App() {
                     }}
                     dragging={taskDrag?.id === t.id}
                     key={t.id}
+                    onSwipe={(task, action) =>
+                      action === "delete" ? deleteTask(task.id) : archiveTask(task.id)
+                    }
                     startDrag={startTaskDrag}
                     tag={tagFor(t)}
                     task={t}
@@ -2270,7 +2382,7 @@ export default function App() {
           <span>
             <Icon name="check" size={14} />
           </span>
-          {toast}
+          <p className="toast-text">{toast}</p>
           {toastState?.undo && (
             <button
               className="toast-undo"

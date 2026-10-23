@@ -604,3 +604,26 @@ button.next-row.to-planner>.icon { color: var(--faint); }
 @media (pointer: coarse) {
   input, textarea, select { font-size: 16px !important; }
 }
+
+/* ── Swipe a task: left deletes, right archives ─────────────────────── */
+.task-card { touch-action: pan-y; }
+.swipe-row { border-radius: 15px; position: relative; }
+.swipe-row.swiping { overflow: hidden; }
+.swipe-row.swiping .task-card:hover { box-shadow: none; }
+.swipe-actions { align-items: center; border-radius: 15px; display: none; font-size: 13px; font-weight: 700; inset: 0; justify-content: space-between; letter-spacing: -.01em; padding: 0 22px; position: absolute; transition: background .15s ease, color .15s ease; }
+.swipe-row.swiping .swipe-actions { display: flex; }
+.swipe-row.to-archive .swipe-actions { background: var(--sage); color: var(--sage-dark); }
+.swipe-row.to-delete .swipe-actions { background: var(--peach); color: var(--peach-dark); }
+.swipe-row.to-archive .swipe-delete, .swipe-row.to-delete .swipe-archive { visibility: hidden; }
+.swipe-row.to-archive.armed .swipe-actions { background: var(--sage-dark); color: var(--day-ink, #141613); }
+.swipe-row.to-delete.armed .swipe-actions { background: var(--alert); color: #fff; }
+
+/* Toast: one line, sized to its text, never squeezed by the screen edge */
+.toast { max-width: calc(100vw - 32px); width: max-content; }
+.toast-text { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toast>span { flex: 0 0 auto; }
+.toast-undo { flex: 0 0 auto; }
+@media (max-width: 820px) {
+  .toast { font-size: 13px; padding: 10px 16px 10px 10px; }
+  .toast-undo { font-size: 13px; }
+}
