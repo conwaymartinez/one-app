@@ -9,8 +9,6 @@ const LIFE = [
   { id: "life:commute", name: "Commute", cls: "commute" },
   { id: "life:interrupted", name: "Interrupted", cls: "interrupted" },
 ] as const
-/** Brush that puts an hour back to what the outline planned. */
-const AS_PLANNED = "__as-planned"
 const allHours = Array.from({ length: 24 }, (_, i) => i)
 const emptyOutline: DayOutline = { focus: null, hours: {} }
 const emptyReview: DailyReview = { rests: [] }
@@ -39,14 +37,6 @@ function hourLabel(hour: number) {
   if (h === 12) return "12 PM"
   return `${h % 12} ${h < 12 ? "AM" : "PM"}`
 }
-function shortHour(hour: number) {
-  const n = hour % 12 === 0 ? 12 : hour % 12
-  return `${n}${hour < 12 ? "a" : "p"}`
-}
-function hoursText(n: number) {
-  return `${n}h`
-}
-
 type Props = {
   tags: Tag[]
   tasks: Task[]
@@ -163,7 +153,7 @@ export default function Wrapped(props: Props) {
   }
 
   const dayToggle = showDayToggle && (
-    <div className="day-toggle" role="tablist">
+    <div className="wrap-day-toggle" role="tablist">
       {[yesterdayKey, todayKey].map((key) => (
         <button
           aria-selected={dateKey === key}
@@ -210,18 +200,30 @@ export default function Wrapped(props: Props) {
 
 type Day = ReturnType<typeof useDay>
 
-/* ── Screen 1: the review ─────────────────────────────────────────────── */
+/* ── Screen 1: the review, one question at a time ─────────────────────── */
+
+type StepKind = "start" | "block" | "extra" | "tasks" | "note" | "summary"
+type Step = { id: string; kind: StepKind; run?: number }
+
+const lifeHints: Record<string, string> = {
+  "life:sick": "Rest and recovery",
+  "life:commute": "On the move",
+  "life:interrupted": "Something else came up",
+}
+
+function hourSpan(start: number, end: number) {
+  return `${hourLabel(start)} – ${hourLabel(end)}`
+}
 
 function DayReview({
   dateKey,
   day,
   dayToggle,
-  isToday,
   confirm,
   tags,
+  tasks,
   updateReview,
   setTaskDone,
-  toast,
 }: Props & {
   dateKey: string
   day: Day
@@ -229,294 +231,635 @@ function DayReview({
   isToday: boolean
   confirm: () => void
 }) {
-  const [tool, setTool] = useState<string | null>(null)
-  const [confirmReset, setConfirmReset] = useState(false)
-  const brush = useRef<{ pointerId: number; last: number } | null>(null)
   const { review, planned, actual, tagById } = day
-  const label = dateFromKey(dateKey).toLocaleDateString("en-US", {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-  })
-  const changedCount = Object.keys(review.actualHours || {}).length
-
-  function paint(h: number) {
-    if (!tool) return
+  const weekday = dateFromKey(dateKey).toLocaleDateString("en-US", { weekday: "long" })
+  const [changed, setChanged] = useState(
+    () => Object.keys(review.actualHours || {}).length > 0 || !day.runs.length,
+  )
+  // Freeze the task list so unchecking a task never makes it vanish mid-review.
+  const [taskIds] = useState(() => day.dayTasks.map((t) => t.id))
+  const reviewTasks = taskIds
+    .map((id) => tasks.find((t) => t.id === id))
+    .filter((t): t is Task => !!t)
+  function buildSteps(withChanges: boolean): Step[] {
+    const steps: Step[] = [{ id: "start", kind: "start" }]
+    if (withChanges) {
+      day.runs.forEach((_, i) => steps.push({ id: `block-${i}`, kind: "block", run: i }))
+      steps.push({ id: "extra", kind: "extra" })
+    }
+    if (taskIds.length) steps.push({ id: "tasks", kind: "tasks" })
+    steps.push({ id: "note", kind: "note" }, { id: "summary", kind: "summary" })
+    return steps
+  }
+  const steps = buildSteps(changed)
+  const [stepId, setStepId] = useState(() =>
+    review.confirmedAt ? "summary" : "start",
+  )
+  const index = Math.max(0, steps.findIndex((s) => s.id === stepId))
+  const step = steps[index]
+  const timer = useRef(0)
+  useEffect(() => () => window.clearTimeout(timer.current), [])
+  // Editing from the summary: answer, then head straight back to it
+  // (hour questions still run through the remaining hour questions).
+  const [fromSummary, setFromSummary] = useState(false)
+  function go(id: string) {
+    window.clearTimeout(timer.current)
+    if (stepId === "summary") setFromSummary(true)
+    if (id === "summary") setFromSummary(false)
+    setStepId(id)
+  }
+  function next(after = 0, list = steps) {
+    window.clearTimeout(timer.current)
+    const i = list.findIndex((s) => s.id === stepId)
+    const current = list[i]
+    let target = list[Math.min(list.length - 1, i + 1)].id
+    if (fromSummary && current && current.kind !== "start" && current.kind !== "block")
+      target = "summary"
+    if (target === "summary") setFromSummary(false)
+    if (after) timer.current = window.setTimeout(() => setStepId(target), after)
+    else setStepId(target)
+  }
+  function back() {
+    go(steps[Math.max(0, index - 1)].id)
+  }
+  function setHours(update: (hours: Record<number, string>) => void) {
     updateReview(dateKey, (r) => {
       const hours = { ...(r.actualHours || {}) }
-      const plan = planned(h)
-      if (tool === AS_PLANNED || tool === plan) delete hours[h]
-      else hours[h] = tool
-      const next = { ...r, actualHours: hours }
-      if (!Object.keys(hours).length) delete next.actualHours
-      return next
+      update(hours)
+      const nextReview = { ...r, actualHours: hours }
+      if (!Object.keys(hours).length) delete nextReview.actualHours
+      return nextReview
     })
   }
-  function hourAt(x: number, y: number) {
-    const hour = document
-      .elementFromPoint(x, y)
-      ?.closest("[data-hour]")
-      ?.getAttribute("data-hour")
-    return hour == null ? null : Number(hour)
+  function choosePlan(asPlanned: boolean) {
+    if (asPlanned)
+      setHours((hours) => {
+        for (const h of day.plannedHours) delete hours[h]
+      })
+    setChanged(!asPlanned)
+    const list = buildSteps(!asPlanned)
+    window.clearTimeout(timer.current)
+    timer.current = window.setTimeout(() => setStepId(list[1].id), 260)
   }
-  function brushDown(e: React.PointerEvent<HTMLDivElement>) {
-    const h = hourAt(e.clientX, e.clientY)
-    if (h === null) return
-    if (!tool) {
-      toast("Pick a label first, then tap hours")
-      return
-    }
-    e.preventDefault()
-    try {
-      e.currentTarget.setPointerCapture(e.pointerId)
-    } catch {}
-    brush.current = { pointerId: e.pointerId, last: h }
-    paint(h)
-  }
-  function brushMove(e: React.PointerEvent<HTMLDivElement>) {
-    const b = brush.current
-    if (!b || b.pointerId !== e.pointerId) return
-    const h = hourAt(e.clientX, e.clientY)
-    if (h === null || h === b.last) return
-    b.last = h
-    paint(h)
-  }
-  function brushEnd(e: React.PointerEvent<HTMLDivElement>) {
-    // The last move can arrive with the lift, so paint where the finger ended.
-    if (e.type === "pointerup") brushMove(e)
-    brush.current = null
-  }
-
-  function cellLabel(h: number) {
-    const plan = planned(h)
-    const now = actual(h)
-    const name = (id: string | null) =>
-      !id
-        ? "nothing"
-        : tagById.get(id)?.name || LIFE.find((l) => l.id === id)?.name || "nothing"
-    return plan === now
-      ? `${hourLabel(h)}: ${plan ? `${name(plan)}, as planned` : "not planned"}`
-      : `${hourLabel(h)}: planned ${name(plan)}, actually ${name(now)}`
-  }
-  function cellClass(id: string | null) {
-    if (!id) return "empty"
+  const labelName = (id: string) =>
+    tagById.get(id)?.name || LIFE.find((l) => l.id === id)?.name || ""
+  const labelClass = (id: string) => {
     const life = LIFE.find((l) => l.id === id)
-    return life ? `life ${life.cls}` : tagById.get(id)?.color || "empty"
+    return life ? `life ${life.cls}` : tagById.get(id)?.color || ""
   }
+  const questionNumber = steps
+    .slice(0, index + 1)
+    .filter((s) => s.kind !== "summary").length
 
-  const brushes = [
-    ...tags.map((tag) => ({ id: tag.id, name: tag.name, cls: tag.color })),
-    ...LIFE.map((l) => ({ id: l.id, name: l.name, cls: `life ${l.cls}` })),
-  ]
-
-  return (
-    <main className="review">
-      <div className="review-inner">
-        <header className="review-head">
-          {dayToggle}
-          <small>Daily review</small>
-          <h1>{label}</h1>
-          <p>Planned vs. what actually happened. Fix anything that changed, then confirm your day.</p>
-        </header>
-
-        <section className="review-card">
-          <div className="review-section-head">
-            <small>The brief</small>
-            <strong>What you planned</strong>
-          </div>
-          <div className="brief-focus">
-            <span>Focus</span>
+  let body: React.ReactNode = null
+  if (step.kind === "start") {
+    body = (
+      <>
+        {dayToggle}
+        <FlowRings day={day} />
+        <h1 className="flow-q">How did {weekday} go?</h1>
+        {day.runs.length ? (
+          <p className="flow-sub">
+            You planned {day.plannedHours.length}h
             {day.focus ? (
-              <b className={`tag-chip ${day.focus.color}`}>{day.focus.name}</b>
-            ) : (
-              <em>No focus set</em>
-            )}
-          </div>
-          {day.runs.length ? (
-            <ul className="brief-runs">
-              {day.runs.map((run) => (
-                <li key={run.start}>
-                  <span className="mono">
-                    {hourLabel(run.start)} – {hourLabel(run.end)}
-                  </span>
-                  <b className={`tag-chip ${run.tag.color}`}>{run.tag.name}</b>
-                  <em className="mono">{hoursText(run.end - run.start)}</em>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="review-empty">
-              No hours outlined for this day. You can still log what happened below.
-            </p>
-          )}
-        </section>
-
-        <section className="review-card">
-          <div className="review-section-head">
-            <small>Hours</small>
-            <strong>What actually happened</strong>
-          </div>
-          <p className="review-hint">
-            Pick a label, then tap or drag across hours. A corner mark shows what you planned.
+              <>
+                {" "}with a focus on <b className={`ink-${day.focus.color}`}>{day.focus.name}</b>
+              </>
+            ) : null}
+            .
           </p>
-          <div className="brush-row" role="radiogroup" aria-label="Label to paint">
-            {brushes.map((b) => (
+        ) : (
+          <p className="flow-sub">There was no outline for this day.</p>
+        )}
+        <div className="choices">
+          {day.runs.length ? (
+            <>
+              <Choice k="A" onClick={() => choosePlan(true)} selected={!changed && !!review.confirmedAt}>
+                Pretty much to plan
+              </Choice>
+              <Choice k="B" onClick={() => choosePlan(false)} selected={changed && Object.keys(review.actualHours || {}).length > 0}>
+                Some things changed
+              </Choice>
+            </>
+          ) : (
+            <>
+              <Choice k="A" onClick={() => go("extra")}>Log what took my time</Choice>
+              <Choice k="B" onClick={() => go(taskIds.length ? "tasks" : "note")}>Nothing to log</Choice>
+            </>
+          )}
+        </div>
+      </>
+    )
+  } else if (step.kind === "block" && step.run !== undefined) {
+    body = (
+      <BlockQuestion
+        key={step.id}
+        labelClass={labelClass}
+        onDone={() => next(380)}
+        planned={planned}
+        actual={actual}
+        run={day.runs[step.run]}
+        setHours={setHours}
+        tags={tags}
+      />
+    )
+  } else if (step.kind === "extra") {
+    body = (
+      <ExtraQuestion
+        actual={actual}
+        labelClass={labelClass}
+        labelName={labelName}
+        planned={planned}
+        review={review}
+        setHours={setHours}
+        tags={tags}
+      />
+    )
+  } else if (step.kind === "tasks") {
+    const doneCount = reviewTasks.filter((t) => t.completed).length
+    body = (
+      <>
+        <h1 className="flow-q">Which of these got done?</h1>
+        <p className="flow-sub">
+          {doneCount} of {reviewTasks.length} checked off. Tap to change.
+        </p>
+        <div className="task-picks">
+          {reviewTasks.map((t) => {
+            const tag = t.tagId ? tagById.get(t.tagId) : undefined
+            return (
               <button
-                aria-checked={tool === b.id}
-                className={`brush ${tool === b.id ? "active" : ""}`}
-                key={b.id}
-                onClick={() => setTool(tool === b.id ? null : b.id)}
-                role="radio"
+                aria-pressed={t.completed}
+                className={`task-pick ${t.completed ? "done" : ""}`}
+                key={t.id}
+                onClick={() => setTaskDone(t.id, !t.completed, dateKey)}
                 type="button"
               >
-                <i className={`swatch ${b.cls}`} />
-                {b.name}
+                <span className="pick-check">
+                  {t.completed && <Icon name="check" size={16} />}
+                </span>
+                <span className="pick-copy">
+                  <strong>{t.title}</strong>
+                  <small>
+                    {tag && <i className={`swatch ${tag.color}`} />}
+                    {tag ? `${tag.name} · ` : ""}
+                    {t.hour !== undefined && t.date === dateKey ? `${hourLabel(t.hour)} · ` : ""}
+                    {t.duration} min
+                  </small>
+                </span>
               </button>
-            ))}
-            <button
-              aria-checked={tool === AS_PLANNED}
-              className={`brush ${tool === AS_PLANNED ? "active" : ""}`}
-              onClick={() => setTool(tool === AS_PLANNED ? null : AS_PLANNED)}
-              role="radio"
-              type="button"
-            >
-              <Icon name="eraser" size={14} />
-              As planned
-            </button>
-          </div>
-          <div
-            className={`hour-grid ${tool ? "armed" : ""}`}
-            onPointerCancel={brushEnd}
-            onPointerDown={brushDown}
-            onPointerMove={brushMove}
-            onPointerUp={brushEnd}
-          >
-            {allHours.map((h) => {
-              const plan = planned(h)
-              const now = actual(h)
-              const changed = plan !== now
-              return (
-                <button
-                  aria-label={cellLabel(h)}
-                  className={`hour-cell ${cellClass(now)} ${changed ? "changed" : ""}`}
-                  data-hour={h}
-                  key={h}
-                  type="button"
-                >
-                  <small>{shortHour(h)}</small>
-                  {changed && plan && (
-                    <i className={`was ${tagById.get(plan)?.color || ""}`} />
-                  )}
-                  {changed && !plan && <i className="was added" />}
-                </button>
-              )
-            })}
-          </div>
-          <div className="hour-summary">
-            <span>
-              <b>{day.onPlan}/{day.plannedHours.length}h</b> on plan
+            )
+          })}
+        </div>
+      </>
+    )
+  } else if (step.kind === "note") {
+    body = (
+      <>
+        <h1 className="flow-q">One line about {weekday}.</h1>
+        <p className="flow-sub">What stood out? What would you change tomorrow? Optional.</p>
+        <textarea
+          aria-label="Note for the day"
+          className="flow-note"
+          onChange={(e) => {
+            const value = e.target.value
+            updateReview(dateKey, (r) => ({ ...r, dayNote: value }))
+          }}
+          placeholder="Type your answer here…"
+          rows={3}
+          value={review.dayNote || ""}
+        />
+      </>
+    )
+  } else {
+    const first = steps.find((s) => s.kind === "block")?.id || "start"
+    const done = day.done.length
+    body = (
+      <>
+        <h1 className="flow-q">{weekday}, summarized</h1>
+        <p className="flow-sub">Tap anything to change it.</p>
+        <div className="health-grid">
+          <button className="health-tile wide" onClick={() => go("start")} type="button">
+            <small>Planned vs. lived</small>
+            <div className="health-rings">
+              <MiniRings label="Planned" owner={planned} tagById={tagById} />
+              <MiniRings delay={300} label="Lived" owner={actual} tagById={tagById} />
+            </div>
+          </button>
+          <button className="health-tile" onClick={() => go(first)} type="button">
+            <small>On plan</small>
+            <b>
+              {day.onPlan}
+              <em>/{day.plannedHours.length}h</em>
+            </b>
+            <Meter value={day.plannedHours.length ? day.onPlan / day.plannedHours.length : 0} />
+          </button>
+          <button className="health-tile" onClick={() => go(taskIds.length ? "tasks" : "note")} type="button">
+            <small>Tasks done</small>
+            <b>
+              {done}
+              <em>/{reviewTasks.length}</em>
+            </b>
+            <Meter value={reviewTasks.length ? done / reviewTasks.length : 0} />
+          </button>
+          <button className="health-tile" onClick={() => go(changed ? first : "start")} type="button">
+            <small>Life happened</small>
+            <b>
+              {day.lifeTotal}
+              <em>h</em>
+            </b>
+            <span className="tile-detail">
+              {day.life.length
+                ? day.life.map((l) => `${l.hours}h ${l.name.toLowerCase()}`).join(" · ")
+                : "Nothing got in the way"}
             </span>
-            {day.life.map((l) => (
-              <span key={l.id}>
-                <i className={`swatch life ${l.cls}`} />
-                <b>{hoursText(l.hours)}</b> {l.name.toLowerCase()}
-              </span>
-            ))}
-            {day.extra > 0 && (
-              <span>
-                <b>+{hoursText(day.extra)}</b> unplanned work
-              </span>
-            )}
-            {changedCount > 0 && (
+          </button>
+          <button className="health-tile" onClick={() => go(changed ? "extra" : "start")} type="button">
+            <small>Focus</small>
+            <b className={`tile-name ink-${day.focus?.color || "none"}`}>
+              {day.focus?.name || "None set"}
+            </b>
+            <span className="tile-detail">
+              {day.extra ? `+${day.extra}h unplanned work` : `${day.projectHours}h on projects`}
+            </span>
+          </button>
+          <button className="health-tile wide" onClick={() => go("note")} type="button">
+            <small>Note</small>
+            <span className={`tile-note ${review.dayNote?.trim() ? "" : "empty"}`}>
+              {review.dayNote?.trim() ? `“${review.dayNote.trim()}”` : "Add a line about the day"}
+            </span>
+          </button>
+        </div>
+      </>
+    )
+  }
+
+  const isSummary = step.kind === "summary"
+  return (
+    <main className={`flow ${day.theme}`}>
+      <div className="flow-progress" aria-hidden>
+        <i style={{ width: `${((index + 1) / steps.length) * 100}%` }} />
+      </div>
+      <section className="flow-stage" key={step.id}>
+        {!isSummary && (
+          <span className="flow-num">
+            {questionNumber} <Icon name="right" size={13} />
+          </span>
+        )}
+        {body}
+      </section>
+      <footer className="flow-nav">
+        {index > 0 ? (
+          <button aria-label="Previous question" className="flow-back" onClick={back} type="button">
+            <Icon name="left" size={18} />
+          </button>
+        ) : (
+          <span />
+        )}
+        {isSummary ? (
+          <button className="flow-ok play" onClick={confirm} type="button">
+            Looks right, play my day
+            <Icon name="sparkle" size={16} />
+          </button>
+        ) : step.kind !== "start" ? (
+          <button className="flow-ok" onClick={() => next()} type="button">
+            {step.kind === "note" && !review.dayNote?.trim() ? "Skip" : "OK"}
+            <Icon name="check" size={16} />
+          </button>
+        ) : (
+          <span />
+        )}
+      </footer>
+    </main>
+  )
+}
+
+function Choice({
+  k,
+  children,
+  onClick,
+  selected = false,
+  hint,
+  swatch,
+}: {
+  k: string
+  children: React.ReactNode
+  onClick: () => void
+  selected?: boolean
+  hint?: string
+  swatch?: string
+}) {
+  const [flash, setFlash] = useState(false)
+  return (
+    <button
+      aria-pressed={selected}
+      className={`choice ${selected ? "selected" : ""} ${flash ? "flash" : ""}`}
+      onAnimationEnd={() => setFlash(false)}
+      onClick={() => {
+        setFlash(true)
+        onClick()
+      }}
+      type="button"
+    >
+      <kbd>{k}</kbd>
+      {swatch && <i className={`swatch ${swatch}`} />}
+      <span>
+        {children}
+        {hint && <small>{hint}</small>}
+      </span>
+      {selected && <Icon name="check" size={16} />}
+    </button>
+  )
+}
+
+function Meter({ value }: { value: number }) {
+  return (
+    <span className="meter">
+      <i style={{ width: `${Math.round(Math.min(1, Math.max(0, value)) * 100)}%` }} />
+    </span>
+  )
+}
+
+/** The planned day as one ring, for the opening question. */
+function FlowRings({ day }: { day: Day }) {
+  return (
+    <div className="flow-ring">
+      <MiniRings label="" owner={day.planned} tagById={day.tagById} />
+    </div>
+  )
+}
+
+const keys = "ABCDEFGHIJ"
+
+function BlockQuestion({
+  run,
+  planned,
+  actual,
+  tags,
+  setHours,
+  labelClass,
+  onDone,
+}: {
+  run: { start: number; end: number; tag: Tag }
+  planned: (h: number) => string | null
+  actual: (h: number) => string | null
+  tags: Tag[]
+  setHours: (update: (hours: Record<number, string>) => void) => void
+  labelClass: (id: string) => string
+  onDone: () => void
+}) {
+  const len = run.end - run.start
+  const range = Array.from({ length: len }, (_, i) => run.start + i)
+  const changedHours = range.filter((h) => actual(h) !== planned(h))
+  const existing = changedHours.length
+    ? (() => {
+        const counts = new Map<string, number>()
+        for (const h of changedHours) {
+          const id = actual(h) || ""
+          counts.set(id, (counts.get(id) || 0) + 1)
+        }
+        return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0]
+      })()
+    : null
+  const [answer, setAnswer] = useState<"yes" | "partly" | "no" | null>(
+    !changedHours.length ? null : changedHours.length === len ? "no" : "partly",
+  )
+  const [doneHours, setDoneHours] = useState(
+    changedHours.length && changedHours.length < len ? len - changedHours.length : Math.max(1, len - 1),
+  )
+  const [replacement, setReplacement] = useState<string | null>(existing)
+  function write(done: number, rep: string | null) {
+    setHours((hours) => {
+      range.forEach((h, i) => {
+        if (!rep || i < done) delete hours[h]
+        else hours[h] = rep
+      })
+    })
+  }
+  const options = [
+    ...LIFE.map((l) => ({ id: l.id, name: l.name, hint: lifeHints[l.id] })),
+    ...tags
+      .filter((t) => t.id !== run.tag.id)
+      .map((t) => ({ id: t.id, name: t.name, hint: "Another project" })),
+  ]
+  const asking = answer === "no" || answer === "partly"
+  return (
+    <>
+      <h1 className="flow-q">
+        <span className="mono flow-time">{hourSpan(run.start, run.end)}</span>
+        was for <b className={`ink-${run.tag.color}`}>{run.tag.name}</b>. Did it happen?
+      </h1>
+      <div className="choices">
+        <Choice
+          k="A"
+          onClick={() => {
+            setAnswer("yes")
+            setReplacement(null)
+            write(len, null)
+            onDone()
+          }}
+          selected={answer === "yes"}
+        >
+          Yes, all {len}h
+        </Choice>
+        {len > 1 && (
+          <Choice
+            k="B"
+            onClick={() => {
+              setAnswer("partly")
+              if (replacement) write(doneHours, replacement)
+            }}
+            selected={answer === "partly"}
+          >
+            Partly
+          </Choice>
+        )}
+        <Choice
+          k={len > 1 ? "C" : "B"}
+          onClick={() => {
+            setAnswer("no")
+            if (replacement) write(0, replacement)
+          }}
+          selected={answer === "no"}
+        >
+          No
+        </Choice>
+      </div>
+      {answer === "partly" && (
+        <div className="followup">
+          <p className="followup-q">How much of it happened?</p>
+          <div className="pill-row">
+            {Array.from({ length: len - 1 }, (_, i) => i + 1).map((n) => (
               <button
-                className={`reset-hours ${confirmReset ? "danger" : ""}`}
-                onBlur={() => setConfirmReset(false)}
+                className={`pill ${doneHours === n ? "selected" : ""}`}
+                key={n}
                 onClick={() => {
-                  if (!confirmReset) return setConfirmReset(true)
-                  updateReview(dateKey, (r) => {
-                    const next = { ...r }
-                    delete next.actualHours
-                    return next
-                  })
-                  setConfirmReset(false)
+                  setDoneHours(n)
+                  if (replacement) write(n, replacement)
                 }}
                 type="button"
               >
-                {confirmReset ? "Tap again to reset" : "Reset to plan"}
+                {n}h
               </button>
-            )}
+            ))}
           </div>
-        </section>
+        </div>
+      )}
+      {asking && (
+        <div className="followup">
+          <p className="followup-q">
+            What took {answer === "partly" ? `the other ${len - doneHours}h` : "its place"}?
+          </p>
+          <div className="choices compact">
+            {options.map((o, i) => (
+              <Choice
+                hint={o.hint}
+                k={keys[i] || "•"}
+                key={o.id}
+                onClick={() => {
+                  setReplacement(o.id)
+                  write(answer === "no" ? 0 : doneHours, o.id)
+                  onDone()
+                }}
+                selected={replacement === o.id}
+                swatch={labelClass(o.id)}
+              >
+                {o.name}
+              </Choice>
+            ))}
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
 
-        <section className="review-card">
-          <div className="review-section-head">
-            <small>Tasks</small>
-            <strong>What got done</strong>
-            <span className="mono">
-              {day.done.length}/{day.dayTasks.length}
-            </span>
-          </div>
-          {day.dayTasks.length ? (
-            <ul className="review-tasks">
-              {day.dayTasks.map((t) => {
-                const tag = t.tagId ? tagById.get(t.tagId) : undefined
-                return (
-                  <li className={t.completed ? "done" : ""} key={t.id}>
-                    <button
-                      aria-label={`${t.title}: ${t.completed ? "done" : "not done"}`}
-                      aria-pressed={t.completed}
-                      className="review-check"
-                      onClick={() => setTaskDone(t.id, !t.completed, dateKey)}
-                      type="button"
-                    >
-                      {t.completed && <Icon name="check" size={14} />}
-                    </button>
-                    <div>
-                      <strong>{t.title}</strong>
-                      <span>
-                        {tag && <b className={`tag-chip ${tag.color}`}>{tag.name}</b>}
-                        <em className="mono">
-                          {t.hour !== undefined && t.date === dateKey
-                            ? hourLabel(t.hour)
-                            : "Unscheduled"}{" "}
-                          · {t.duration} min
-                        </em>
-                      </span>
-                    </div>
-                  </li>
-                )
-              })}
-            </ul>
+function ExtraQuestion({
+  planned,
+  actual,
+  review,
+  tags,
+  setHours,
+  labelClass,
+  labelName,
+}: {
+  planned: (h: number) => string | null
+  actual: (h: number) => string | null
+  review: DailyReview
+  tags: Tag[]
+  setHours: (update: (hours: Record<number, string>) => void) => void
+  labelClass: (id: string) => string
+  labelName: (id: string) => string
+}) {
+  const [label, setLabel] = useState<string | null>(null)
+  const [start, setStart] = useState<number | null>(null)
+  // Logged extras: unplanned hours that now have a label, grouped into runs.
+  const extras: { start: number; end: number; id: string }[] = []
+  for (const h of allHours) {
+    const id = !planned(h) ? actual(h) : null
+    if (!id) continue
+    const last = extras[extras.length - 1]
+    if (last && last.end === h && last.id === id) last.end = h + 1
+    else extras.push({ start: h, end: h + 1, id })
+  }
+  const free = allHours.filter((h) => !planned(h) && !review.actualHours?.[h])
+  let maxLen = 0
+  if (start !== null) while (maxLen < 6 && free.includes(start + maxLen)) maxLen++
+  const options = [
+    ...LIFE.map((l) => ({ id: l.id, name: l.name })),
+    ...tags.map((t) => ({ id: t.id, name: t.name })),
+  ]
+  return (
+    <>
+      <h1 className="flow-q">Anything else take your time?</h1>
+      <p className="flow-sub">A commute, a sick hour, or work you didn’t plan for. Skip if not.</p>
+      {extras.length > 0 && (
+        <ul className="extra-list">
+          {extras.map((x) => (
+            <li key={x.start}>
+              <i className={`swatch ${labelClass(x.id)}`} />
+              <strong>{labelName(x.id)}</strong>
+              <span className="mono">
+                {hourSpan(x.start, x.end)} · {x.end - x.start}h
+              </span>
+              <button
+                aria-label={`Remove ${labelName(x.id)}`}
+                onClick={() =>
+                  setHours((hours) => {
+                    for (let h = x.start; h < x.end; h++) delete hours[h]
+                  })
+                }
+                type="button"
+              >
+                <Icon name="close" size={14} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="followup">
+        <p className="followup-q">{extras.length ? "Add another" : "What was it?"}</p>
+        <div className="pill-row">
+          {options.map((o) => (
+            <button
+              className={`pill ${label === o.id ? "selected" : ""}`}
+              key={o.id}
+              onClick={() => {
+                setLabel(label === o.id ? null : o.id)
+                setStart(null)
+              }}
+              type="button"
+            >
+              <i className={`swatch ${labelClass(o.id)}`} />
+              {o.name}
+            </button>
+          ))}
+        </div>
+      </div>
+      {label && (
+        <div className="followup">
+          <p className="followup-q">When did it start?</p>
+          {free.length ? (
+            <div className="pill-row hours">
+              {free.map((h) => (
+                <button
+                  className={`pill ${start === h ? "selected" : ""}`}
+                  key={h}
+                  onClick={() => setStart(h)}
+                  type="button"
+                >
+                  {hourLabel(h)}
+                </button>
+              ))}
+            </div>
           ) : (
-            <p className="review-empty">No tasks were scheduled or finished this day.</p>
+            <p className="flow-sub">Every hour is already accounted for.</p>
           )}
-        </section>
-
-        <section className="review-card">
-          <div className="review-section-head">
-            <small>Note</small>
-            <strong>One line about {isToday ? "today" : "the day"}</strong>
+        </div>
+      )}
+      {label && start !== null && (
+        <div className="followup">
+          <p className="followup-q">For how long?</p>
+          <div className="pill-row">
+            {Array.from({ length: maxLen }, (_, i) => i + 1).map((n) => (
+              <button
+                className="pill"
+                key={n}
+                onClick={() => {
+                  setHours((hours) => {
+                    for (let h = start; h < start + n; h++) hours[h] = label
+                  })
+                  setLabel(null)
+                  setStart(null)
+                }}
+                type="button"
+              >
+                {n}h
+              </button>
+            ))}
           </div>
-          <textarea
-            aria-label="Note for the day"
-            className="review-note"
-            onChange={(e) => {
-              const value = e.target.value
-              updateReview(dateKey, (r) => ({ ...r, dayNote: value }))
-            }}
-            placeholder="What stood out? What would you change tomorrow?"
-            rows={3}
-            value={review.dayNote || ""}
-          />
-        </section>
-      </div>
-      <div className="confirm-bar">
-        <button className="confirm-day" onClick={confirm} type="button">
-          {review.confirmedAt ? "Update & replay my day" : "Confirm my day"}
-          <Icon name="sparkle" size={16} />
-        </button>
-      </div>
-    </main>
+        </div>
+      )}
+    </>
   )
 }
 
@@ -617,7 +960,7 @@ function MiniRings({
           )
         })}
       </svg>
-      <figcaption>{label}</figcaption>
+      {label && <figcaption>{label}</figcaption>}
     </figure>
   )
 }
