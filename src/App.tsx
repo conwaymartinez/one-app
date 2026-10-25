@@ -1,28 +1,10 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react"
+import { FormEvent, useEffect, useRef, useState } from "react"
 import Icon from "./Icon"
 import OutlineClock from "./OutlineClock"
-import type { Color, DayOutline, Tag } from "./types"
+import Wrapped from "./Wrapped"
+import type { Color, DailyReview, DayOutline, Tag, Task } from "./types"
 
 type View = "home" | "plan" | "cooldown"
-type Task = {
-  id: number
-  title: string
-  duration: number
-  tagId: string | null
-  completed: boolean
-  carried?: boolean
-  /** Sample task shipped with the test build. */
-  example?: boolean
-  hour?: number
-  /** Local YYYY-MM-DD of the scheduled hour. */
-  date?: string
-  category?: string
-  color?: Color
-  completedAt?: string
-  /** Swiped away to the right: hidden from the list and calendar, kept in data. */
-  archived?: boolean
-}
-type DailyReview = { rests: string[]; notes?: Record<string, string> }
 
 const starterTags: Tag[] = [
   { id: "one-app", name: "One app", color: "lavender" },
@@ -116,36 +98,46 @@ function loadOutlines(): Record<string, DayOutline> {
   }
 }
 
-function loadCooldownReviews() {
+/** Daily reviews, validated defensively; every field but `rests` is optional. */
+function loadCooldownReviews(): Record<string, DailyReview> {
+  const strings = (value: unknown) =>
+    value && typeof value === "object"
+      ? Object.fromEntries(
+          Object.entries(value as Record<string, unknown>).filter(
+            (entry): entry is [string, string] => typeof entry[1] === "string",
+          ),
+        )
+      : {}
   try {
     const stored = JSON.parse(
       localStorage.getItem("one-cooldown-reviews") || "{}",
-    ) as Record<string, { rests?: unknown; notes?: unknown }>
+    ) as Record<string, any>
     if (!stored || typeof stored !== "object") return {}
-    return Object.fromEntries(
-      Object.entries(stored).map(([key, review]) => [
-        key,
-        {
-          rests: Array.isArray(review?.rests)
-            ? review.rests.filter((id): id is string => typeof id === "string")
-            : [],
-          notes:
-            review?.notes && typeof review.notes === "object"
-              ? Object.fromEntries(
-                  Object.entries(review.notes as Record<string, unknown>).filter(
-                    (entry): entry is [string, string] =>
-                      typeof entry[1] === "string",
-                  ),
-                )
-              : {},
-        },
-      ]),
-    )
+    const result: Record<string, DailyReview> = {}
+    for (const [key, review] of Object.entries(stored)) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(key) || !review || typeof review !== "object")
+        continue
+      const next: DailyReview = {
+        rests: Array.isArray(review.rests)
+          ? review.rests.filter((id: unknown): id is string => typeof id === "string")
+          : [],
+        notes: strings(review.notes),
+      }
+      const hours: Record<number, string> = {}
+      for (const [hour, id] of Object.entries(strings(review.actualHours))) {
+        const h = Number(hour)
+        if (Number.isInteger(h) && h >= 0 && h < 24) hours[h] = id
+      }
+      if (Object.keys(hours).length) next.actualHours = hours
+      if (typeof review.dayNote === "string") next.dayNote = review.dayNote
+      if (typeof review.confirmedAt === "string") next.confirmedAt = review.confirmedAt
+      result[key] = next
+    }
+    return result
   } catch {
     return {}
   }
 }
-
 
 function Button({
   children,
@@ -393,188 +385,6 @@ function Modal({
   )
 }
 
-function HabitDay({
-  count,
-  date,
-  isRest,
-  selected,
-  onSelect,
-  compact = false,
-}: {
-  count: number
-  date: Date
-  isRest: boolean
-  selected: boolean
-  onSelect: () => void
-  compact?: boolean
-}) {
-  const label = date.toLocaleDateString("en-US", {
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  })
-  const state = count
-    ? `${count} completed`
-    : isRest
-      ? "rest day"
-      : "no activity"
-  return (
-    <button
-      aria-label={`${label}: ${state}`}
-      className={`habit-day intensity-${Math.min(count, 4)} ${
-        isRest && !count ? "rest" : ""
-      } ${selected ? "selected" : ""} ${compact ? "compact" : ""}`}
-      onClick={onSelect}
-      type="button"
-    >
-      {compact ? null : (
-        <>
-          <span>{date.getDate()}</span>
-          {count > 0 && <i />}
-        </>
-      )}
-    </button>
-  )
-}
-
-function MonthCalendar({
-  month,
-  selectedDate,
-  counts,
-  rests,
-  onSelect,
-}: {
-  month: Date
-  selectedDate: string
-  counts: Record<string, number>
-  rests: string[]
-  onSelect: (key: string) => void
-}) {
-  const first = new Date(month.getFullYear(), month.getMonth(), 1)
-  const leading = (first.getDay() + 6) % 7
-  const total = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate()
-  const cells = Array.from({ length: leading + total }, (_, index) =>
-    index < leading
-      ? null
-      : new Date(month.getFullYear(), month.getMonth(), index - leading + 1),
-  )
-  while (cells.length % 7) cells.push(null)
-  return (
-    <div className="month-calendar">
-      <div className="weekday-row">
-        {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day) => (
-          <span key={day}>{day}</span>
-        ))}
-      </div>
-      <div className="month-grid">
-        {cells.map((day, index) =>
-          day ? (
-            <HabitDay
-              count={counts[localDateKey(day)] || 0}
-              date={day}
-              isRest={rests.includes(localDateKey(day))}
-              key={localDateKey(day)}
-              onSelect={() => onSelect(localDateKey(day))}
-              selected={selectedDate === localDateKey(day)}
-            />
-          ) : (
-            <span className="empty-day" key={`empty-${index}`} />
-          ),
-        )}
-      </div>
-    </div>
-  )
-}
-
-function YearHeatmap({
-  start,
-  selectedDate,
-  counts,
-  rests,
-  onSelect,
-}: {
-  start: Date
-  selectedDate: string
-  counts: Record<string, number>
-  rests: string[]
-  onSelect: (key: string) => void
-}) {
-  const first = new Date(start.getFullYear(), start.getMonth(), 1)
-  const last = new Date(first.getFullYear() + 1, first.getMonth(), 0)
-  const gridStart = shiftDate(first, -((first.getDay() + 6) % 7))
-  const totalDays =
-    Math.round((last.getTime() - gridStart.getTime()) / 86400000) + 1
-  const cellCount = Math.ceil(totalDays / 7) * 7
-  const days = Array.from({ length: cellCount }, (_, index) =>
-    shiftDate(gridStart, index),
-  )
-  const months = Array.from({ length: 12 }, (_, i) =>
-    new Date(first.getFullYear(), first.getMonth() + i, 1).toLocaleDateString(
-      "en-US",
-      { month: "short" },
-    ),
-  )
-  return (
-    <div className="year-chart">
-      <div className="year-months">
-        {months.map((label, i) => (
-          <span key={`${label}-${i}`}>{label}</span>
-        ))}
-      </div>
-      <div className="year-grid">
-        {days.map((day) => {
-          const key = localDateKey(day)
-          if (day < first || day > last)
-            return <span className="year-empty" key={key} />
-          return (
-            <HabitDay
-              compact
-              count={counts[key] || 0}
-              date={day}
-              isRest={rests.includes(key)}
-              key={key}
-              onSelect={() => onSelect(key)}
-              selected={selectedDate === key}
-            />
-          )
-        })}
-      </div>
-      <div className="heat-legend">
-        <span>Less</span>
-        {[0, 1, 2, 3, 4].map((level) => (
-          <i className={`intensity-${level}`} key={level} />
-        ))}
-        <span>More</span>
-        <i className="rest" />
-        <span>Rest</span>
-      </div>
-    </div>
-  )
-}
-
-function CountUp({ value, delay = 0 }: { value: number; delay?: number }) {
-  const [shown, setShown] = useState(0)
-  useEffect(() => {
-    let frame = 0
-    const begin = performance.now() + delay
-    const tick = (now: number) => {
-      const p = Math.min(1, Math.max(0, (now - begin) / 1200))
-      setShown(Math.round(value * (1 - Math.pow(1 - p, 3))))
-      if (p < 1) frame = requestAnimationFrame(tick)
-    }
-    frame = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(frame)
-  }, [value, delay])
-  return <>{shown}</>
-}
-
-const storyThemes: Record<Color, { mood: string; kicker: string }> = {
-  lavender: { mood: "Dreamy", kicker: "Your day, in soft focus" },
-  blue: { mood: "Electric", kicker: "Systems online. Today in" },
-  peach: { mood: "Golden hour", kicker: "The sun set on" },
-  sage: { mood: "Grounded", kicker: "Growing steadily in" },
-}
-
 export default function App() {
   const [tags, setTags] = useState<Tag[]>(() => {
     try {
@@ -672,16 +482,7 @@ export default function App() {
   const [confirmReset, setConfirmReset] = useState(false)
   const [reviews, setReviews] =
     useState<Record<string, DailyReview>>(loadCooldownReviews)
-  const [rawActiveTagId, setActiveTagId] = useState("")
-  const [selectedHistoryDate, setSelectedHistoryDate] = useState(localDateKey)
-  const [historyMonth, setHistoryMonth] = useState(
-    () => new Date(new Date().getFullYear(), new Date().getMonth(), 1),
-  )
-  const [sheetOpen, setSheetOpen] = useState(false)
-  const [holding, setHolding] = useState(false)
-  const [noteFocused, setNoteFocused] = useState(false)
-  const [storyRun, setStoryRun] = useState(0)
-  const gesture = useRef<{ x: number; y: number; t: number } | null>(null)
+  const [wrappedRun, setWrappedRun] = useState(0)
   const [split, setSplit] = useState(() => {
     try {
       return Number(localStorage.getItem("one-split")) || 60
@@ -760,10 +561,6 @@ export default function App() {
     }
   }, [reviews])
   useEffect(() => {
-    if (rawActiveTagId && !tags.some((tag) => tag.id === rawActiveTagId))
-      setActiveTagId("")
-  }, [rawActiveTagId, tags])
-  useEffect(() => {
     if (!toastState) return
     const timer = window.setTimeout(
       () => setToastState(null),
@@ -778,8 +575,6 @@ export default function App() {
     day: "numeric",
   })
   const todayKey = localDateKey(now)
-  // Wrapped follows the real day, so an app left open overnight rolls over.
-  const cooldownDate = todayKey
   // Unscheduled first, then by day and hour.
   const open = tasks
     .filter((t) => !t.completed && !t.archived)
@@ -1184,107 +979,24 @@ export default function App() {
     )
     if (selectedTagId === id) setSelectedTagId(remaining[0]?.id || "")
   }
-  const trackedCompleted = tasks.filter((task) => task.completedAt)
-  const todayCompleted = trackedCompleted.filter(
-    (task) => localDateKey(new Date(task.completedAt!)) === cooldownDate,
-  )
-  const completionCounts = useMemo(
-    () =>
-      trackedCompleted.reduce(
-        (all, task) => {
-          if (!task.tagId || !task.completedAt) return all
-          const key = localDateKey(new Date(task.completedAt))
-          all[task.tagId] ||= {}
-          all[task.tagId][key] = (all[task.tagId][key] || 0) + 1
-          return all
-        },
-        {} as Record<string, Record<string, number>>,
-      ),
-    [trackedCompleted],
-  )
-  const currentTag = tags.find((tag) => tag.id === rawActiveTagId) || tags[0]
-  const activeTagId = currentTag?.id || ""
-  const storyIndex = Math.max(0, tags.findIndex((tag) => tag.id === activeTagId))
-  const storyPaused = holding || sheetOpen || noteFocused
-  const todayReview = reviews[cooldownDate] || { rests: [] }
-  const todayNote = todayReview.notes?.[activeTagId] || ""
-  const tagCompletedTasks = trackedCompleted
-    .filter((task) => task.tagId === activeTagId)
-    .sort((x, y) => y.completedAt!.localeCompare(x.completedAt!))
-  const activeTag = currentTag
-  const activeCounts = completionCounts[activeTagId] || {}
-  const activeTodayTasks = todayCompleted.filter(
-    (task) => task.tagId === activeTagId,
-  )
-  const topTodayTask = [...activeTodayTasks].sort(
-    (x, y) => y.duration - x.duration,
-  )[0]
-  const activeTodayMinutes = activeTodayTasks.reduce(
-    (sum, task) => sum + task.duration,
-    0,
-  )
-  const activeRestDates = Object.entries(reviews)
-    .filter(([, review]) => review.rests.includes(activeTagId))
-    .map(([key]) => key)
-  const selectedReview = reviews[selectedHistoryDate] || { rests: [] }
-  const selectedTagCount = activeCounts[selectedHistoryDate] || 0
-  const selectedDateLabel = dateFromKey(selectedHistoryDate).toLocaleDateString(
-    "en-US",
-    { weekday: "long", month: "long", day: "numeric" },
-  )
-  const currentMonthKey = todayKey.slice(0, 7)
-  const heatmapStart = useMemo(() => {
-    const [year, month] = currentMonthKey.split("-").map(Number)
-    return new Date(year, month - 1, 1)
-  }, [currentMonthKey])
-  // "This year" means the current year, not the month being browsed below.
-  const yearTotal = Object.entries(activeCounts)
-    .filter(([key]) => key.startsWith(`${todayKey.slice(0, 4)}-`))
-    .reduce((sum, [, count]) => sum + count, 0)
-  let streak = 0
-  if (activeTagId) {
-    let cursor = dateFromKey(cooldownDate)
-    while (true) {
-      const key = localDateKey(cursor)
-      if (activeCounts[key]) streak += 1
-      else if (!reviews[key]?.rests.includes(activeTagId)) break
-      cursor = shiftDate(cursor, -1)
-    }
-  }
-
-  function goToStory(index: number) {
-    const tag = tags[index]
-    if (!tag) return
-    setActiveTagId(tag.id)
-    setStoryRun((run) => run + 1)
-    setSelectedHistoryDate(cooldownDate)
-    setHistoryMonth(new Date())
-  }
-  function nextStory() {
-    if (storyIndex < tags.length - 1) goToStory(storyIndex + 1)
-  }
-  function prevStory() {
-    goToStory(Math.max(0, storyIndex - 1))
-  }
-  function saveNote(note: string) {
-    updateReview(cooldownDate, (review) => ({
-      ...review,
-      notes: { ...review.notes, [activeTagId]: note },
-    }))
-    if (note) setToast("Note saved")
-  }
   function openCooldown() {
-    setSheetOpen(false)
-    setStoryRun((run) => run + 1)
-    setActiveTagId("")
-    setSelectedHistoryDate(cooldownDate)
-    setHistoryMonth(new Date())
+    setWrappedRun((run) => run + 1)
     setView("cooldown")
   }
-  function selectHistoryDate(key: string) {
-    setSelectedHistoryDate(key)
-    const next = dateFromKey(key)
-    setHistoryMonth(new Date(next.getFullYear(), next.getMonth(), 1))
+  /** Check a task on or off from the review. A past day gets a time on that day so it counts there. */
+  function setTaskDone(id: number, done: boolean, dateKey: string) {
+    setTasks((all) =>
+      all.map((t) => {
+        if (t.id !== id) return t
+        if (!done) return { ...t, completed: false, completedAt: undefined }
+        let when = new Date()
+        if (dateKey !== localDateKey()) {
+          when = dateFromKey(dateKey)
+          when.setHours(t.date === dateKey && t.hour !== undefined ? t.hour : 12, 30)
+        }
+        return { ...t, completed: true, completedAt: when.toISOString() }
+      }),
+    )
   }
   function updateReview(
     dateKey: string,
@@ -1307,15 +1019,6 @@ export default function App() {
       return copy
     })
   }
-  function toggleRest() {
-    if (!activeTagId || selectedTagCount) return
-    updateReview(selectedHistoryDate, (review) => ({
-      ...review,
-      rests: review.rests.includes(activeTagId)
-        ? review.rests.filter((id) => id !== activeTagId)
-        : [...review.rests, activeTagId],
-    }))
-  }
   return (
     <div className="app">
       <header className="topbar">
@@ -1323,10 +1026,7 @@ export default function App() {
           aria-current={view === "home" ? "page" : undefined}
           aria-label="Home: outline your day"
           className={view === "home" ? "brand active" : "brand"}
-          onClick={() => {
-            setSheetOpen(false)
-            setView("home")
-          }}
+          onClick={() => setView("home")}
           type="button"
         >
           <span>1</span>
@@ -1657,390 +1357,21 @@ export default function App() {
       )}
 
       {view === "cooldown" && (
-        <main className={`wrapped ${activeTag?.color || "sage"}`}>
-          {activeTag ? (
-            <>
-              <div className="wrapped-glow" key={`glow-${activeTag.id}`} />
-              <header className="story-top">
-                <div className="story-segments">
-                  {tags.map((tag, index) => (
-                    <span
-                      className={
-                        index < storyIndex
-                          ? "done"
-                          : index === storyIndex
-                            ? "active"
-                            : ""
-                      }
-                      key={tag.id}
-                    >
-                      {index === storyIndex && (
-                        <i
-                          key={`${tag.id}-${storyRun}`}
-                          onAnimationEnd={nextStory}
-                          style={{
-                            animationPlayState: storyPaused
-                              ? "paused"
-                              : "running",
-                          }}
-                        />
-                      )}
-                    </span>
-                  ))}
-                </div>
-                <div className="story-meta">
-                  <span className="story-avatar">
-                    {activeTag.name.slice(0, 1).toUpperCase()}
-                  </span>
-                  <strong>{activeTag.name}</strong>
-                  <small>Today</small>
-                  {storyPaused && !sheetOpen && <em>Paused</em>}
-                </div>
-              </header>
-
-              <section
-                className="story-stage"
-                key={`${activeTag.id}-${storyRun}`}
-                onPointerCancel={() => setHolding(false)}
-                onPointerDown={(e) => {
-                  gesture.current = { x: e.clientX, y: e.clientY, t: Date.now() }
-                  setHolding(true)
-                }}
-                onPointerUp={(e) => {
-                  setHolding(false)
-                  const start = gesture.current
-                  if (!start) return
-                  const dy = e.clientY - start.y
-                  const dx = e.clientX - start.x
-                  if (dy < -50) return setSheetOpen(true)
-                  if (Math.abs(dx) > 60) return dx < 0 ? nextStory() : prevStory()
-                  if (Date.now() - start.t > 280) return
-                  const rect = e.currentTarget.getBoundingClientRect()
-                  if (e.clientX - rect.left < rect.width / 3) prevStory()
-                  else nextStory()
-                }}
-              >
-                <div aria-hidden className="story-deco">
-                  <span /><span /><span />
-                </div>
-                <div className="wrap-layout">
-                  <div className="wrap-lead">
-                    <small className="wrap-kicker" style={{ "--d": 0 } as React.CSSProperties}>
-                      {storyThemes[activeTag.color].kicker}
-                    </small>
-                    <h1 aria-label={activeTag.name} className="wrap-title">
-                      {activeTag.name.split("").map((char, i) => (
-                        <span
-                          key={i}
-                          style={{ "--i": i } as React.CSSProperties}
-                        >
-                          {char === " " ? "\u00a0" : char}
-                        </span>
-                      ))}
-                    </h1>
-                    {activeTodayTasks.length ? (
-                      <p className="wrap-hero" style={{ "--d": 2 } as React.CSSProperties}>
-                        <b>
-                          <CountUp delay={700} value={activeTodayMinutes} />
-                        </b>
-                        <span>
-                          minutes
-                          <br />
-                          invested
-                        </span>
-                      </p>
-                    ) : (
-                      <p className="wrap-hero quiet" style={{ "--d": 2 } as React.CSSProperties}>
-                        <b>A quiet day.</b>
-                        <span>
-                          {todayReview.rests.includes(activeTagId)
-                            ? "Intentional rest. Rhythm protected."
-                            : "Resting on purpose? Mark it in the details."}
-                        </span>
-                      </p>
-                    )}
-                  </div>
-                  <div className="wrap-side">
-                    {topTodayTask && (
-                      <div className="win-card" style={{ "--d": 3 } as React.CSSProperties}>
-                        <svg className="win-badge" viewBox="0 0 100 100">
-                          <defs>
-                            <path
-                              d="M50,50 m-37,0 a37,37 0 1,1 74,0 a37,37 0 1,1 -74,0"
-                              id="win-circle"
-                            />
-                          </defs>
-                          <text>
-                            <textPath href="#win-circle">
-                              BIGGEST WIN ★ BIGGEST WIN ★
-                            </textPath>
-                          </text>
-                        </svg>
-                        <span className="win-star">★</span>
-                        <small>Biggest win</small>
-                        <strong>{topTodayTask.title}</strong>
-                        <em>{topTodayTask.duration} min of pure focus</em>
-                      </div>
-                    )}
-                    <div className="wrap-stats">
-                      {activeTodayTasks.length > 0 && (
-                        <p style={{ "--d": 4 } as React.CSSProperties}>
-                          <b>
-                            <CountUp delay={1300} value={activeTodayTasks.length} />
-                          </b>
-                          <span>
-                            {activeTodayTasks.length === 1 ? "task" : "tasks"} done
-                          </span>
-                        </p>
-                      )}
-                      <p style={{ "--d": 5 } as React.CSSProperties}>
-                        <b>
-                          <CountUp delay={1500} value={streak} />
-                        </b>
-                        <span>day rhythm</span>
-                      </p>
-                      <p style={{ "--d": 6 } as React.CSSProperties}>
-                        <b>
-                          <CountUp delay={1700} value={yearTotal} />
-                        </b>
-                        <span>this year</span>
-                      </p>
-                    </div>
-                    {todayNote && (
-                      <blockquote style={{ "--d": 7 } as React.CSSProperties}>“{todayNote}”</blockquote>
-                    )}
-                  </div>
-                </div>
-                <div aria-hidden className="wrap-marquee">
-                  <div>
-                    {Array.from({ length: 2 }, (_, copy) => (
-                      <span key={copy}>
-                        {[0, 1, 2].map((n) => (
-                          <span key={n}>
-                            {activeTag.name} <i>✦</i>{" "}
-                            {storyThemes[activeTag.color].mood} <i>✦</i>{" "}
-                            {streak} day rhythm <i>✦</i>{" "}
-                          </span>
-                        ))}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-                <button
-                  className="swipe-hint"
-                  onClick={() => setSheetOpen(true)}
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onPointerUp={(e) => e.stopPropagation()}
-                  type="button"
-                >
-                  <span className="chev" />
-                  Swipe up for details
-                </button>
-              </section>
-
-              <form
-                className="note-bar"
-                key={`note-${activeTag.id}`}
-                onSubmit={(e) => {
-                  e.preventDefault()
-                  const input = e.currentTarget.elements.namedItem(
-                    "note",
-                  ) as HTMLInputElement
-                  saveNote(input.value.trim())
-                  input.blur()
-                }}
-              >
-                <input
-                  aria-label={`Note for ${activeTag.name}`}
-                  autoComplete="off"
-                  defaultValue={todayNote}
-                  name="note"
-                  onBlur={() => setNoteFocused(false)}
-                  onFocus={() => setNoteFocused(true)}
-                  placeholder={`Note on ${activeTag.name}…`}
-                />
-                <Button aria-label="Save note" className="note-send" icon="check" type="submit" />
-              </form>
-
-              <section
-                aria-hidden={!sheetOpen}
-                className={`story-sheet ${sheetOpen ? "open" : ""}`}
-              >
-                <button
-                  aria-label="Close details"
-                  className="sheet-handle"
-                  onClick={() => setSheetOpen(false)}
-                  type="button"
-                >
-                  <span />
-                </button>
-                <div className="sheet-body">
-                <section className="year-panel inline-year">
-                  <div className="section-heading">
-                    <div>
-                      <small>Year at a glance</small>
-                      <strong>From {heatmapStart.toLocaleDateString("en-US", { month: "long", year: "numeric" })}</strong>
-                    </div>
-                    <span>Each square is one day</span>
-                  </div>
-                  <YearHeatmap
-                    counts={activeCounts}
-                    onSelect={selectHistoryDate}
-                    rests={activeRestDates}
-                    selectedDate={selectedHistoryDate}
-                    start={heatmapStart}
-                  />
-                </section>
-                <div className="progress-calendar-grid">
-                  <section className="month-panel">
-                    <div className="calendar-heading">
-                      <div>
-                        <small>Monthly rhythm</small>
-                        <strong>
-                          {historyMonth.toLocaleDateString("en-US", {
-                            month: "long",
-                            year: "numeric",
-                          })}
-                        </strong>
-                      </div>
-                      <div>
-                        <Button
-                          aria-label="Previous month"
-                          className="icon-button"
-                          icon="left"
-                          onClick={() =>
-                            setHistoryMonth(
-                              (current) =>
-                                new Date(
-                                  current.getFullYear(),
-                                  current.getMonth() - 1,
-                                  1,
-                                ),
-                            )
-                          }
-                        />
-                        <Button
-                          aria-label="Next month"
-                          className="icon-button"
-                          icon="right"
-                          onClick={() =>
-                            setHistoryMonth(
-                              (current) =>
-                                new Date(
-                                  current.getFullYear(),
-                                  current.getMonth() + 1,
-                                  1,
-                                ),
-                            )
-                          }
-                        />
-                      </div>
-                    </div>
-                    <MonthCalendar
-                      counts={activeCounts}
-                      month={historyMonth}
-                      onSelect={selectHistoryDate}
-                      rests={activeRestDates}
-                      selectedDate={selectedHistoryDate}
-                    />
-                  </section>
-                  <aside className="compact-day-control">
-                    <div>
-                      <small>Selected day</small>
-                      <strong>{selectedDateLabel}</strong>
-                      <span
-                        className={
-                          selectedTagCount
-                            ? "day-status active"
-                            : selectedReview.rests.includes(activeTagId)
-                              ? "day-status rest"
-                              : "day-status"
-                        }
-                      >
-                        {selectedTagCount
-                          ? `${selectedTagCount} completed`
-                          : selectedReview.rests.includes(activeTagId)
-                            ? "Rest day"
-                            : "No activity"}
-                      </span>
-                    </div>
-                    <Button
-                      className={`rest-toggle ${
-                        selectedReview.rests.includes(activeTagId)
-                          ? "active"
-                          : ""
-                      }`}
-                      disabled={selectedTagCount > 0}
-                      onClick={toggleRest}
-                    >
-                      {selectedTagCount
-                        ? "Activity recorded from tasks"
-                        : selectedReview.rests.includes(activeTagId)
-                          ? "Marked as intentional rest"
-                          : "Mark as intentional rest"}
-                      {!selectedTagCount && (
-                        <Icon
-                          name={
-                            selectedReview.rests.includes(activeTagId)
-                              ? "check"
-                              : "moon"
-                          }
-                          size={15}
-                        />
-                      )}
-                    </Button>
-                  </aside>
-                </div>
-                  <section className="done-list">
-                    <div className="section-heading">
-                      <div>
-                        <small>Completed</small>
-                        <strong>Tasks you finished</strong>
-                      </div>
-                      <span>{tagCompletedTasks.length} total</span>
-                    </div>
-                    {tagCompletedTasks.length ? (
-                      <ul>
-                        {tagCompletedTasks.map((task) => (
-                          <li key={task.id}>
-                            <Icon name="check" size={14} />
-                            <strong>{task.title}</strong>
-                            <span>
-                              {new Date(task.completedAt!).toLocaleDateString(
-                                "en-US",
-                                { month: "short", day: "numeric" },
-                              )}{" "}
-                              · {task.duration} min
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="done-empty">
-                        Nothing completed yet. Finish a task in this project to see it here.
-                      </p>
-                    )}
-                  </section>
-                  <Button
-                    className="primary sheet-finish"
-                    onClick={() => {
-                      setView("home")
-                      setToast("Today’s wrap is complete")
-                    }}
-                  >
-                    Finish the day
-                    <Icon name="check" size={16} />
-                  </Button>
-                </div>
-              </section>
-            </>
-          ) : (
-            <section className="wrapped-empty">
-              <Icon name="sparkle" size={18} />
-              <span>Create a project to start your wrap.</span>
-            </section>
-          )}
-        </main>
+        <Wrapped
+          key={`${wrappedRun}-${todayKey}`}
+          onFinish={() => {
+            setView("home")
+            setToast("Day wrapped")
+          }}
+          outlines={outlines}
+          reviews={reviews}
+          setTaskDone={setTaskDone}
+          tags={tags}
+          tasks={tasks}
+          toast={setToast}
+          todayKey={todayKey}
+          updateReview={updateReview}
+        />
       )}
 
       {scheduleTask && (
