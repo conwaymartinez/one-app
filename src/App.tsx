@@ -1,7 +1,8 @@
-import { FormEvent, useEffect, useRef, useState } from "react"
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react"
 import Icon from "./Icon"
 import OutlineClock from "./OutlineClock"
 import Wrapped from "./Wrapped"
+import { useSync } from "./sync"
 import type { Color, DailyReview, DayOutline, Tag, Task } from "./types"
 
 type View = "home" | "plan" | "cooldown"
@@ -560,6 +561,18 @@ export default function App() {
       // Storage full or blocked; reviews still work for this session.
     }
   }, [reviews])
+  // Optional sync between devices (off until a token is connected in More).
+  const syncData = useMemo(
+    () => ({ tags, tasks, outlines, reviews }),
+    [tags, tasks, outlines, reviews],
+  )
+  const sync = useSync(syncData, (next) => {
+    setTags(next.tags)
+    setTasks(next.tasks)
+    setOutlines(next.outlines)
+    setReviews(next.reviews)
+  })
+  const [syncToken, setSyncToken] = useState("")
   useEffect(() => {
     if (!toastState) return
     const timer = window.setTimeout(
@@ -1538,14 +1551,89 @@ export default function App() {
             />
           </div>
           <p className="modal-copy">
-            Everything you add is saved in this browser on this device only. It
-            isn’t synced or sent anywhere.
+            {sync.connected
+              ? "Your data is saved in this browser and synced to a private GitHub gist that only your token can write to."
+              : "Everything you add is saved in this browser on this device only. Turn on sync below to share it between your devices."}
           </p>
+          <div className="sync-box">
+            <strong>Sync between devices</strong>
+            {sync.connected ? (
+              <>
+                <p className="sync-status" data-status={sync.status}>
+                  {sync.status === "syncing"
+                    ? "Syncing…"
+                    : sync.status === "error"
+                      ? sync.error
+                      : sync.lastSyncedAt
+                        ? `Synced ${new Date(sync.lastSyncedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+                        : "Connected"}
+                </p>
+                <div className="sync-buttons">
+                  <button
+                    className="sync-button"
+                    disabled={sync.status === "syncing"}
+                    onClick={() => sync.syncNow()}
+                    type="button"
+                  >
+                    Sync now
+                  </button>
+                  <button
+                    className="sync-button"
+                    onClick={() => sync.disconnect()}
+                    type="button"
+                  >
+                    Disconnect
+                  </button>
+                </div>
+              </>
+            ) : (
+              <form
+                className="sync-form"
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  sync.connect(syncToken)
+                  setSyncToken("")
+                }}
+              >
+                <small>
+                  Create a GitHub token with only the “gist” permission, paste it
+                  here, and do the same on your other device.{" "}
+                  <a
+                    href="https://github.com/settings/tokens/new?scopes=gist&description=One%20app%20sync"
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    Create token
+                  </a>
+                </small>
+                <input
+                  aria-label="GitHub token"
+                  autoCapitalize="off"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  onChange={(e) => setSyncToken(e.target.value)}
+                  placeholder="Paste GitHub token"
+                  spellCheck={false}
+                  type="password"
+                  value={syncToken}
+                />
+                <button
+                  className="sync-button"
+                  disabled={!syncToken.trim()}
+                  type="submit"
+                >
+                  Connect
+                </button>
+              </form>
+            )}
+          </div>
           <div className="more-actions">
             <button
               className={`more-row ${confirmReset ? "danger" : ""}`}
               onClick={() => {
                 if (!confirmReset) return setConfirmReset(true)
+                // Resetting must not wipe the synced copy, so disconnect first.
+                if (sync.connected) sync.disconnect()
                 setTags(starterTags)
                 setTasks(withDates(seed))
                 setOutlines({})
@@ -1566,6 +1654,7 @@ export default function App() {
                 </strong>
                 <small>
                   Removes your projects, tasks and outlines, and restores the examples.
+                  {sync.connected && " Sync is turned off on this device; the synced copy is kept."}
                 </small>
               </span>
             </button>

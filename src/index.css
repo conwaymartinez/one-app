@@ -773,3 +773,17 @@ button.next-row.to-planner>.icon { color: var(--faint); }
 @media (prefers-reduced-motion: reduce) { .wrap-word>span, .ring-seg { animation: none !important; } }
 .flow .ring-seg { animation-delay: calc(var(--rd, 0ms) + var(--h) * 18ms + 120ms); }
 .flow-ok.play { font-size: 16px; white-space: nowrap; }
+
+.sync-box { border: 1px solid var(--line); border-radius: 14px; display: grid; gap: 8px; margin-bottom: 14px; padding: 14px 15px; }
+.sync-box>strong { font-size: 12px; font-weight: 600; }
+.sync-box small { color: var(--faint); font-size: 10px; line-height: 1.5; }
+.sync-box a { color: var(--brand); }
+.sync-form { display: grid; gap: 8px; }
+.sync-form input { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; font-size: 16px; outline: 0; padding: 11px 13px; width: 100%; }
+.sync-form input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
+.sync-status { color: var(--muted); font-size: 11px; margin: 0; }
+.sync-status[data-status="error"] { color: var(--alert); }
+.sync-buttons { display: flex; gap: 8px; }
+.sync-button { background: var(--subtle); border: 1px solid var(--line); border-radius: 999px; font-size: 11px; font-weight: 600; padding: 9px 15px; }
+.sync-button:hover:not(:disabled), .sync-button:focus-visible { border-color: var(--strong-line); outline: 0; }
+.sync-button:disabled { cursor: not-allowed; opacity: .45; }
