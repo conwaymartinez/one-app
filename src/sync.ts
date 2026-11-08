@@ -88,13 +88,16 @@ export function sameEntries(a: Entries, b: Entries) {
   return true
 }
 
-/** Newest entry wins; on a tie the local one is kept. */
+/**
+ * Newest entry wins. On a tie the remote copy wins, so two devices that both
+ * hold an untracked (time 0) version of the same item end up agreeing.
+ */
 export function mergeEntries(local: Entries, remote: Entries): Entries {
   const merged: Entries = {}
   for (const key of new Set([...Object.keys(local), ...Object.keys(remote)])) {
     const a = local[key]
     const b = remote[key]
-    merged[key] = !a ? b : !b ? a : b.t > a.t ? b : a
+    merged[key] = !a ? b : !b ? a : b.t >= a.t ? b : a
   }
   return merged
 }
@@ -208,7 +211,9 @@ async function github(
   })
   if (res.status === 401) throw new Error("GitHub rejected the token.")
   if (res.status === 403 || res.status === 429)
-    throw new Error("GitHub is rate limiting this token. Try again later.")
+    throw new Error(
+      "GitHub refused. Check the token has the “gist” permission, or try again later.",
+    )
   if (res.status === 404) throw new Error("Synced gist not found.")
   if (!res.ok) throw new Error(`GitHub error ${res.status}.`)
   return res.json()
@@ -255,6 +260,8 @@ async function pullRemote(config: Config, gistId: string): Promise<Entries> {
 export function useSync(
   data: SyncData,
   apply: (next: SyncData) => void,
+  /** Starter projects every fresh install has; see the first-sync rule below. */
+  sampleTags: Tag[] = [],
   onRemoteChange?: () => void,
 ) {
   const [config, setConfig] = useState<Config | null>(loadConfig)
@@ -353,14 +360,38 @@ export function useSync(
       // Everything below is synchronous, so no edit can slip in between.
       track(dataRef.current)
       const local = localEntries()
-      const merged = mergeEntries(local, remote)
+      // First sync of this device against existing data: untouched starter
+      // projects the other device already deleted must not come back.
+      const base = { ...local }
+      if (!configRef.current!.lastSyncedAt && Object.keys(remote).length) {
+        const used = new Set<string>()
+        for (const task of dataRef.current.tasks)
+          if (!task.example && task.tagId) used.add(task.tagId)
+        for (const outline of Object.values(dataRef.current.outlines)) {
+          if (outline.focus) used.add(outline.focus)
+          for (const id of Object.values(outline.hours)) used.add(id)
+        }
+        for (const tag of sampleTags) {
+          const key = `tag:${tag.id}`
+          const entry = local[key]
+          if (
+            entry &&
+            entry.t === 0 &&
+            !remote[key] &&
+            !used.has(tag.id) &&
+            JSON.stringify(entry.v) === JSON.stringify(tag)
+          )
+            delete base[key]
+        }
+      }
+      const merged = mergeEntries(base, remote)
 
       if (!sameEntries(merged, local)) {
         const next = materialize(merged, dataRef.current)
-        for (const [key, value] of Object.entries(toValues(next)))
-          seen.current![key] = JSON.stringify(value)
-        for (const key of Object.keys(seen.current!))
-          if (!(key in toValues(next))) delete seen.current![key]
+        const nextValues = toValues(next)
+        seen.current = {}
+        for (const [key, value] of Object.entries(nextValues))
+          seen.current[key] = JSON.stringify(value)
         applyRef.current(next)
         notifyRef.current?.()
       }
@@ -407,7 +438,7 @@ export function useSync(
         window.setTimeout(sync, 500)
       }
     }
-  }, [track, localEntries])
+  }, [track, localEntries, sampleTags])
 
   // Notice local edits, and push shortly after.
   useEffect(() => {

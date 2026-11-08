@@ -571,7 +571,7 @@ export default function App() {
     setTasks(next.tasks)
     setOutlines(next.outlines)
     setReviews(next.reviews)
-  })
+  }, starterTags)
   const [syncToken, setSyncToken] = useState("")
   useEffect(() => {
     if (!toastState) return
@@ -1552,7 +1552,7 @@ export default function App() {
           </div>
           <p className="modal-copy">
             {sync.connected
-              ? "Your data is saved in this browser and synced to a private GitHub gist that only your token can write to."
+              ? "Your data is saved in this browser and synced to a secret gist in your GitHub account. Only your token can change it."
               : "Everything you add is saved in this browser on this device only. Turn on sync below to share it between your devices."}
           </p>
           <div className="sync-box">
