@@ -38,3 +38,16 @@ export type DailyReview = {
   /** ISO time the day was confirmed in the review. */
   confirmedAt?: string
 }
+
+/** How much planning the user has room for right now: the depth slider. Saved in `one-depth`. */
+export type Depth = "park" | "outline" | "plan"
+
+/** A parked thought, saved in `one-notes`. Sorted onto a project on the Outline, turned into a task in the Planner. */
+export type Note = {
+  id: number
+  text: string
+  /** Project chosen on the Outline, if any. */
+  tagId?: string | null
+  /** ISO time it was parked. */
+  createdAt: string
+}

@@ -1,11 +1,42 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react"
 import Icon from "./Icon"
 import OutlineClock from "./OutlineClock"
+import Park, { DepthSlider, ParkedToTasks, QuickWrap } from "./Park"
 import Wrapped from "./Wrapped"
 import { useSync } from "./sync"
-import type { Color, DailyReview, DayOutline, Tag, Task } from "./types"
+import type { Color, DailyReview, DayOutline, Depth, Note, Tag, Task } from "./types"
 
-type View = "home" | "plan" | "cooldown"
+type View = "park" | "home" | "plan" | "cooldown"
+/** Each depth opens one view: Park, the outline clock, or the Planner. */
+const depthView: Record<Depth, View> = { park: "park", outline: "home", plan: "plan" }
+function loadDepth(): Depth {
+  try {
+    const saved = localStorage.getItem("one-depth")
+    if (saved === "park" || saved === "outline" || saved === "plan") return saved
+  } catch {
+    // Storage blocked; start on the outline.
+  }
+  return "outline"
+}
+function loadNotes(): Note[] {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem("one-notes") || "[]")
+    if (!Array.isArray(saved)) return []
+    return saved
+      .filter(
+        (n): n is Note =>
+          !!n && typeof n === "object" && typeof n.id === "number" && typeof n.text === "string",
+      )
+      .map((n) => ({
+        id: n.id,
+        text: n.text,
+        tagId: typeof n.tagId === "string" ? n.tagId : null,
+        createdAt: typeof n.createdAt === "string" ? n.createdAt : new Date().toISOString(),
+      }))
+  } catch {
+    return []
+  }
+}
 
 const starterTags: Tag[] = [
   { id: "one-app", name: "One app", color: "lavender" },
@@ -421,7 +452,10 @@ export default function App() {
       return withDates(seed)
     }
   })
-  const [view, setView] = useState<View>("home")
+  const [depth, setDepth] = useState<Depth>(loadDepth)
+  const [view, setView] = useState<View>(() => depthView[depth])
+  const [notes, setNotes] = useState<Note[]>(loadNotes)
+  const [quickWrap, setQuickWrap] = useState(false)
   const [outlines, setOutlines] =
     useState<Record<string, DayOutline>>(loadOutlines)
   const [outlineDate, setOutlineDate] = useState(localDateKey)
@@ -556,6 +590,20 @@ export default function App() {
   }, [view])
   useEffect(() => {
     try {
+      localStorage.setItem("one-notes", JSON.stringify(notes))
+    } catch {
+      // Storage full or blocked; notes still work for this session.
+    }
+  }, [notes])
+  useEffect(() => {
+    try {
+      localStorage.setItem("one-depth", depth)
+    } catch {
+      // Storage blocked; the slider still works for this session.
+    }
+  }, [depth])
+  useEffect(() => {
+    try {
       localStorage.setItem("one-cooldown-reviews", JSON.stringify(reviews))
     } catch {
       // Storage full or blocked; reviews still work for this session.
@@ -582,11 +630,6 @@ export default function App() {
     return () => window.clearTimeout(timer)
   }, [toastState])
 
-  const date = now.toLocaleDateString("en-US", {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-  })
   const todayKey = localDateKey(now)
   // Unscheduled first, then by day and hour.
   const open = tasks
@@ -993,8 +1036,54 @@ export default function App() {
     if (selectedTagId === id) setSelectedTagId(remaining[0]?.id || "")
   }
   function openCooldown() {
+    // At Park depth an unconfirmed today gets the one-question review.
+    setQuickWrap(depth === "park" && !reviews[todayKey]?.confirmedAt)
     setWrappedRun((run) => run + 1)
     setView("cooldown")
+  }
+  function goDepth(next: Depth) {
+    setDepth(next)
+    setView(depthView[next])
+  }
+  function addNote(text: string) {
+    setNotes((all) => [
+      { id: Date.now(), text, tagId: null, createdAt: new Date().toISOString() },
+      ...all,
+    ])
+    setToast("Parked")
+  }
+  function deleteNote(id: number) {
+    const index = notes.findIndex((n) => n.id === id)
+    const note = notes[index]
+    if (!note) return
+    setNotes((all) => all.filter((n) => n.id !== id))
+    showUndo("Note removed", () =>
+      setNotes((all) => {
+        if (all.some((n) => n.id === id)) return all
+        const copy = [...all]
+        copy.splice(Math.min(index, copy.length), 0, note)
+        return copy
+      }),
+    )
+  }
+  function assignNote(id: number, tagId: string | null) {
+    setNotes((all) => all.map((n) => (n.id === id ? { ...n, tagId } : n)))
+    const project = tags.find((tag) => tag.id === tagId)
+    setToast(project ? `Sorted into ${project.name}` : "Back to unsorted")
+  }
+  function noteToTask(id: number, tagId: string | null, duration: number) {
+    const note = notes.find((n) => n.id === id)
+    if (!note) return
+    const taskId = Date.now()
+    setTasks((all) => [
+      ...all,
+      { id: taskId, title: note.text, duration, tagId, completed: false },
+    ])
+    setNotes((all) => all.filter((n) => n.id !== id))
+    showUndo("Made a task", () => {
+      setTasks((all) => all.filter((t) => t.id !== taskId))
+      setNotes((all) => (all.some((n) => n.id === id) ? all : [note, ...all]))
+    })
   }
   /** Check a task on or off from the review. A past day gets a time on that day so it counts there. */
   function setTaskDone(id: number, done: boolean, dateKey: string) {
@@ -1036,31 +1125,16 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <button
-          aria-current={view === "home" ? "page" : undefined}
-          aria-label="Home: outline your day"
+          aria-label="Outline your day"
           className={view === "home" ? "brand active" : "brand"}
-          onClick={() => setView("home")}
+          onClick={() => goDepth("outline")}
           type="button"
         >
           <span>1</span>
           <strong>One</strong>
         </button>
-        <div className="date-nav">
-          {view !== "home" && (
-            <div>
-              <small>Today</small>
-              <strong>{date}</strong>
-            </div>
-          )}
-        </div>
+        <DepthSlider active={view !== "cooldown"} depth={depth} onChange={goDepth} />
         <div className="header-actions">
-          <Button
-            className={view === "plan" ? "nav-button active" : "nav-button"}
-            icon="list"
-            onClick={() => setView("plan")}
-          >
-            Planner
-          </Button>
           {SHOW_WRAPPED && (
             <Button
               className={view === "cooldown" ? "nav-button active" : "nav-button"}
@@ -1082,6 +1156,18 @@ export default function App() {
           </Button>
         </div>
       </header>
+
+      {view === "park" && (
+        <Park
+          focus={tags.find((tag) => tag.id === outlines[todayKey]?.focus)}
+          notes={notes}
+          onAdd={addNote}
+          onDelete={deleteNote}
+          onOutline={() => goDepth("outline")}
+          outlinedHours={Object.keys(outlines[todayKey]?.hours || {}).length}
+          tags={tags}
+        />
+      )}
 
       {view === "plan" && (
         <>
@@ -1128,6 +1214,7 @@ export default function App() {
                 the calendar. Outlined hours only take their own project. Swipe
                 left to delete, right to archive.
               </p>
+              <ParkedToTasks notes={notes} onMake={noteToTask} tags={tags} />
               <div className="task-list">
                 {open.map((t) => (
                   <TaskCard
@@ -1344,8 +1431,11 @@ export default function App() {
             pendingScrollHour.current = hour
             setCalStart(dateKey)
             setFlashSlot({ date: dateKey, hour })
+            setDepth("plan")
             setView("plan")
           }}
+          notes={notes}
+          onAssignNote={assignNote}
           onShiftDay={shiftOutlineDay}
           onToday={() => setOutlineDate(todayKey)}
           onUndoable={(message, before) => {
@@ -1369,11 +1459,32 @@ export default function App() {
         />
       )}
 
-      {view === "cooldown" && (
+      {view === "cooldown" && quickWrap && (
+        <QuickWrap
+          dayLabel={dateFromKey(todayKey).toLocaleDateString("en-US", { weekday: "long" })}
+          onChanged={() => setQuickWrap(false)}
+          onReviewNotes={() => goDepth("outline")}
+          onSkip={() => {
+            goDepth("park")
+            setToast("Skipped. Tomorrow is a new day.")
+          }}
+          onToPlan={() => {
+            updateReview(todayKey, (review) => ({
+              ...review,
+              confirmedAt: new Date().toISOString(),
+            }))
+            setQuickWrap(false)
+            setWrappedRun((run) => run + 1)
+          }}
+          parkedCount={notes.length}
+        />
+      )}
+
+      {view === "cooldown" && !quickWrap && (
         <Wrapped
           key={`${wrappedRun}-${todayKey}`}
           onFinish={() => {
-            setView("home")
+            setView(depthView[depth])
             setToast("Day wrapped")
           }}
           outlines={outlines}
@@ -1638,6 +1749,8 @@ export default function App() {
                 setTasks(withDates(seed))
                 setOutlines({})
                 setReviews({})
+                setNotes([])
+                setDepth("outline")
                 setSelectedTagId(starterTags[0].id)
                 setOutlineDate(todayKey)
                 setCalStart(todayKey)

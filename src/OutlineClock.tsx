@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import Icon from "./Icon"
-import type { DayOutline, Tag } from "./types"
+import { NotesTray } from "./Park"
+import type { DayOutline, Note, Tag } from "./types"
 
 // Projects are stored as tags (`Tag`) so saved data keeps working.
 
@@ -121,6 +122,8 @@ export default function OutlineClock({
   onUndoable,
   onOpenPlanner,
   onMore,
+  notes,
+  onAssignNote,
 }: {
   dateKey: string
   todayKey: string
@@ -137,6 +140,9 @@ export default function OutlineClock({
   /** Show this day and hour in the Planner. */
   onOpenPlanner: (dateKey: string, hour: number) => void
   onMore: () => void
+  /** Parked notes, sorted onto projects from the tray. */
+  notes: Note[]
+  onAssignNote: (id: number, tagId: string | null) => void
 }) {
   const [armed, setArmed] = useState<Tool | null>(null)
   const [hover, setHover] = useState<Target>(null)
@@ -632,6 +638,38 @@ export default function OutlineClock({
         </div>
 
         <div className="side-col">
+          <section aria-label="Time per project" className="day-sum">
+            <div className="day-sum-head">
+              <span>{outlined} h outlined</span>
+              <span>{24 - outlined} h open</span>
+            </div>
+            <div aria-hidden className="day-sum-bar">
+              {projects.map((project) =>
+                hoursFor[project.id] ? (
+                  <i
+                    className={project.color}
+                    key={project.id}
+                    style={{ flexGrow: hoursFor[project.id] }}
+                  />
+                ) : null,
+              )}
+              <i className="open" style={{ flexGrow: 24 - outlined }} />
+            </div>
+            <ul className="day-sum-list">
+              {projects
+                .filter((project) => hoursFor[project.id])
+                .sort((a, b) => (hoursFor[b.id] || 0) - (hoursFor[a.id] || 0))
+                .map((project) => (
+                  <li key={project.id}>
+                    <i className={project.color} />
+                    <span>{project.name}</span>
+                    {outline.focus === project.id && <em>Focus</em>}
+                    <b>{hoursFor[project.id]} h</b>
+                  </li>
+                ))}
+            </ul>
+          </section>
+
           <section aria-labelledby="projects-title" className="projects">
             <div className="section-row">
               <h2 id="projects-title">Projects</h2>
@@ -693,6 +731,8 @@ export default function OutlineClock({
               </button>
             </div>
           </section>
+
+          <NotesTray notes={notes} onAssign={onAssignNote} tags={projects} />
 
           <section aria-labelledby="next-title" className="up-next">
             <div className="section-row">
