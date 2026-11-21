@@ -2,39 +2,115 @@ import { FormEvent, useRef, useState } from "react"
 import Icon from "./Icon"
 import type { Depth, Note, Tag } from "./types"
 
-/** The depth slider: how much planning you have room for right now. */
+const LEVELS: { id: Depth; label: string; hint: string }[] = [
+  { id: "park", label: "Park", hint: "About a minute · just capture" },
+  { id: "outline", label: "Outline", hint: "A few minutes · shape the day" },
+  { id: "plan", label: "Plan", hint: "15 minutes or more · tasks on hours" },
+]
+
+/**
+ * The depth slider: how much planning you have room for right now.
+ * One track, one thumb, three stops. Drag the thumb, tap the track or a label,
+ * or use the arrow keys; it snaps to the nearest stop when you let go.
+ */
 export function DepthSlider({
   depth,
   active,
   onChange,
 }: {
   depth: Depth
-  /** False while another screen (Wrapped) is open: no level is highlighted. */
+  /** False while another screen (Wrapped) is open: the thumb dims. */
   active: boolean
   onChange: (depth: Depth) => void
 }) {
-  const levels: { id: Depth; label: string; hint: string }[] = [
-    { id: "park", label: "Park", hint: "About a minute: just capture" },
-    { id: "outline", label: "Outline", hint: "A few minutes: shape the day" },
-    { id: "plan", label: "Plan", hint: "15 minutes or more: tasks on hours" },
-  ]
+  const index = Math.max(0, LEVELS.findIndex((level) => level.id === depth))
+  const rail = useRef<HTMLDivElement>(null)
+  // Thumb position while dragging, 0–100 along the track; null when resting.
+  const [dragPos, setDragPos] = useState<number | null>(null)
+  const pos = dragPos ?? index * 50
+  const nearest = Math.round(pos / 50)
+  const shown = LEVELS[nearest]
+
+  function posFrom(clientX: number) {
+    const box = rail.current?.getBoundingClientRect()
+    if (!box || !box.width) return pos
+    return Math.min(100, Math.max(0, ((clientX - box.left) / box.width) * 100))
+  }
+  function go(next: number) {
+    const level = LEVELS[Math.min(2, Math.max(0, next))]
+    if (level.id !== depth || !active) onChange(level.id)
+  }
   return (
-    <nav aria-label="Depth" className="depth-slider">
-      <div className="depth-track">
-        {levels.map((level) => (
-          <button
-            aria-current={active && depth === level.id ? "page" : undefined}
-            className={active && depth === level.id ? "depth-stop on" : "depth-stop"}
-            key={level.id}
-            onClick={() => onChange(level.id)}
-            title={level.hint}
-            type="button"
-          >
-            {level.label}
-          </button>
-        ))}
+    <div className={`depth-slider ${active ? "" : "idle"}`}>
+      <div className="depth-control">
+        <div
+          aria-label="Depth"
+          aria-valuemax={2}
+          aria-valuemin={0}
+          aria-valuenow={nearest}
+          aria-valuetext={`${shown.label}: ${shown.hint}`}
+          className={`depth-rail ${dragPos !== null ? "dragging" : ""}`}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowLeft" || e.key === "ArrowDown") go(index - 1)
+            else if (e.key === "ArrowRight" || e.key === "ArrowUp") go(index + 1)
+            else if (e.key === "Home") go(0)
+            else if (e.key === "End") go(2)
+            else return
+            e.preventDefault()
+          }}
+          onPointerCancel={() => setDragPos(null)}
+          onPointerDown={(e) => {
+            if (e.button !== 0) return
+            e.currentTarget.setPointerCapture(e.pointerId)
+            setDragPos(posFrom(e.clientX))
+          }}
+          onPointerMove={(e) => {
+            if (dragPos === null) return
+            setDragPos(posFrom(e.clientX))
+          }}
+          onPointerUp={(e) => {
+            if (dragPos === null) return
+            const end = posFrom(e.clientX)
+            setDragPos(null)
+            go(Math.round(end / 50))
+          }}
+          ref={rail}
+          role="slider"
+          tabIndex={0}
+        >
+          <span aria-hidden className="depth-line" />
+          <span aria-hidden className="depth-fill" style={{ width: `${pos}%` }} />
+          {LEVELS.map((level, i) => (
+            <span
+              aria-hidden
+              className={i * 50 <= pos ? "depth-dot on" : "depth-dot"}
+              key={level.id}
+              style={{ left: `${i * 50}%` }}
+            />
+          ))}
+          <span aria-hidden className="depth-thumb" style={{ left: `${pos}%` }}>
+            <i />
+          </span>
+        </div>
+        <div aria-hidden className="depth-labels">
+          {LEVELS.map((level, i) => (
+            <button
+              className={i === nearest ? "on" : ""}
+              key={level.id}
+              onClick={() => go(i)}
+              style={{ left: `${i * 50}%` }}
+              tabIndex={-1}
+              type="button"
+            >
+              {level.label}
+            </button>
+          ))}
+        </div>
       </div>
-    </nav>
+      <span aria-live="polite" className="depth-hint">
+        {shown.hint}
+      </span>
+    </div>
   )
 }
 

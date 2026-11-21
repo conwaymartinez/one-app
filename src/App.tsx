@@ -2,6 +2,18 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react"
 import Icon from "./Icon"
 import OutlineClock from "./OutlineClock"
 import Park, { DepthSlider, ParkedToTasks, QuickWrap } from "./Park"
+import {
+  ParkBoard,
+  ParkedRail,
+  TodayRail,
+  WeekOutline,
+  WrappedSide,
+  addDays,
+  dropAt,
+  mondayOf,
+  useIsDesk,
+  type NoteDrop,
+} from "./Desk"
 import Wrapped from "./Wrapped"
 import { useSync } from "./sync"
 import type { Color, DailyReview, DayOutline, Depth, Note, Tag, Task } from "./types"
@@ -456,6 +468,25 @@ export default function App() {
   const [view, setView] = useState<View>(() => depthView[depth])
   const [notes, setNotes] = useState<Note[]>(loadNotes)
   const [quickWrap, setQuickWrap] = useState(false)
+  // Desktop: three panels, the week on Outline, more days on Plan, notes dragged anywhere.
+  const isDesk = useIsDesk()
+  const [outlineMode, setOutlineMode] = useState<"week" | "day">("week")
+  const [planDays, setPlanDays] = useState<number>(() => {
+    try {
+      const saved = Number(localStorage.getItem("one-plan-days"))
+      return saved === 3 || saved === 5 || saved === 7 ? saved : 5
+    } catch {
+      return 5
+    }
+  })
+  const [noteDrag, setNoteDrag] = useState<{
+    id: number
+    x: number
+    y: number
+    over: NoteDrop | null
+  } | null>(null)
+  const noteDragStart = useRef<{ id: number; x: number; y: number; pointerId: number; moved?: boolean } | null>(null)
+  const captureRef = useRef<HTMLInputElement>(null)
   const [outlines, setOutlines] =
     useState<Record<string, DayOutline>>(loadOutlines)
   const [outlineDate, setOutlineDate] = useState(localDateKey)
@@ -582,12 +613,70 @@ export default function App() {
     function onKey(e: KeyboardEvent) {
       const target = e.target as HTMLElement | null
       if (target?.closest("input, textarea, [role=dialog]")) return
-      if (e.key === "ArrowLeft") shiftOutlineDay(-1)
-      if (e.key === "ArrowRight") shiftOutlineDay(1)
+      const step = isDesk && outlineMode === "week" ? 7 : 1
+      if (e.key === "ArrowLeft") shiftOutlineDay(-step)
+      if (e.key === "ArrowRight") shiftOutlineDay(step)
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [view])
+  }, [view, isDesk, outlineMode])
+  // Desktop shortcuts: N parks a note, 1 / 2 / 3 change depth.
+  useEffect(() => {
+    if (!isDesk) return
+    function onKey(e: KeyboardEvent) {
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+      const target = e.target as HTMLElement | null
+      if (target?.closest("input, textarea, select, [contenteditable], [role=dialog]")) return
+      if (document.querySelector(".backdrop")) return
+      if (view === "cooldown" && !quickWrap) return
+      const key = e.key.toLowerCase()
+      if (key === "n") {
+        e.preventDefault()
+        if (view === "cooldown") goDepth("park")
+        requestAnimationFrame(() => captureRef.current?.focus())
+      } else if (key === "1" || key === "2" || key === "3") {
+        goDepth((["park", "outline", "plan"] as const)[Number(key) - 1])
+      }
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  })
+  // Dragging a parked note (desktop): follow the pointer, drop on a project, hour or slot.
+  useEffect(() => {
+    if (!isDesk) return
+    function move(e: PointerEvent) {
+      const start = noteDragStart.current
+      if (!start || e.pointerId !== start.pointerId) return
+      if (!start.moved && Math.hypot(e.clientX - start.x, e.clientY - start.y) < 6) return
+      start.moved = true
+      setNoteDrag({ id: start.id, x: e.clientX, y: e.clientY, over: dropAt(e.clientX, e.clientY) })
+    }
+    function up(e: PointerEvent) {
+      const start = noteDragStart.current
+      if (!start || e.pointerId !== start.pointerId) return
+      noteDragStart.current = null
+      setNoteDrag(null)
+      // Dropped once, outside any state updater.
+      if (start.moved) dropNote(start.id, dropAt(e.clientX, e.clientY))
+    }
+    function cancel() {
+      noteDragStart.current = null
+      setNoteDrag(null)
+    }
+    function esc(e: KeyboardEvent) {
+      if (e.key === "Escape") cancel()
+    }
+    window.addEventListener("pointermove", move)
+    window.addEventListener("pointerup", up)
+    window.addEventListener("pointercancel", cancel)
+    window.addEventListener("keydown", esc)
+    return () => {
+      window.removeEventListener("pointermove", move)
+      window.removeEventListener("pointerup", up)
+      window.removeEventListener("pointercancel", cancel)
+      window.removeEventListener("keydown", esc)
+    }
+  })
   useEffect(() => {
     try {
       localStorage.setItem("one-notes", JSON.stringify(notes))
@@ -595,6 +684,13 @@ export default function App() {
       // Storage full or blocked; notes still work for this session.
     }
   }, [notes])
+  useEffect(() => {
+    try {
+      localStorage.setItem("one-plan-days", String(planDays))
+    } catch {
+      // Storage blocked; the day count still works for this session.
+    }
+  }, [planDays])
   useEffect(() => {
     try {
       localStorage.setItem("one-depth", depth)
@@ -640,7 +736,9 @@ export default function App() {
       const kb = b.hour === undefined ? "" : `${b.date}-${String(b.hour).padStart(2, "0")}`
       return ka === kb ? a.id - b.id : ka < kb ? -1 : 1
     })
-  const calDays = [calStart, localDateKey(shiftDate(dateFromKey(calStart), 1))]
+  const calDays = Array.from({ length: isDesk ? planDays : 2 }, (_, i) =>
+    localDateKey(shiftDate(dateFromKey(calStart), i)),
+  )
   // Archived tasks leave the task list but keep their place on the calendar.
   const scheduled = tasks.filter((t) => t.hour !== undefined)
   const planned = scheduled
@@ -1073,6 +1171,72 @@ export default function App() {
     const project = tags.find((tag) => tag.id === tagId)
     setToast(project ? `Sorted into ${project.name}` : "Back to unsorted")
   }
+  function startNoteDrag(e: React.PointerEvent, id: number) {
+    if (e.button !== 0 || e.pointerType === "touch") return
+    e.preventDefault()
+    noteDragStart.current = { id, x: e.clientX, y: e.clientY, pointerId: e.pointerId }
+  }
+  function dropNote(id: number, target: NoteDrop | null) {
+    const note = notes.find((n) => n.id === id)
+    if (!note || !target) return
+    if (target.kind === "col") {
+      if ((note.tagId || null) !== target.tagId) assignNote(id, target.tagId)
+      return
+    }
+    if (target.kind === "hour") {
+      const tagId = outlines[target.date]?.hours[target.hour]
+      if (!tagId || !tags.some((tag) => tag.id === tagId)) {
+        setToast("That hour is open. Drop it on a painted hour or a project.")
+        return
+      }
+      assignNote(id, tagId)
+      return
+    }
+    // A calendar slot: the note becomes a 30-minute task there.
+    const slotTag = outlines[target.date]?.hours[target.hour]
+    const tagId = slotTag && tags.some((tag) => tag.id === slotTag) ? slotTag : note.tagId ?? null
+    const taskId = Date.now()
+    setTasks((all) => [
+      ...all,
+      { id: taskId, title: note.text, duration: 30, tagId, completed: false, date: target.date, hour: target.hour },
+    ])
+    setNotes((all) => all.filter((n) => n.id !== id))
+    showUndo(`Scheduled ${dayName(target.date).toLowerCase()} at ${hourLabel(target.hour)}`, () => {
+      setTasks((all) => all.filter((t) => t.id !== taskId))
+      setNotes((all) => (all.some((n) => n.id === id) ? all : [note, ...all]))
+    })
+  }
+  /** Paint one hour of any day (desktop week view). */
+  function paintHour(date: string, hour: number, tagId: string | null) {
+    setOutlines((all) => {
+      const current = all[date] || emptyOutline
+      if ((current.hours[hour] ?? null) === tagId) return all
+      const hours = { ...current.hours }
+      if (tagId) hours[hour] = tagId
+      else delete hours[hour]
+      const copy = { ...all }
+      if (!current.focus && !Object.keys(hours).length) delete copy[date]
+      else copy[date] = { ...current, hours }
+      return copy
+    })
+  }
+  function setDayOutline(date: string, next: DayOutline | null, message: string) {
+    const before = outlines[date]
+    setOutlines((all) => {
+      const copy = { ...all }
+      if (!next || (!next.focus && !Object.keys(next.hours).length)) delete copy[date]
+      else copy[date] = next
+      return copy
+    })
+    showUndo(message, () =>
+      setOutlines((all) => {
+        const copy = { ...all }
+        if (before) copy[date] = before
+        else delete copy[date]
+        return copy
+      }),
+    )
+  }
   function noteToTask(id: number, tagId: string | null, duration: number) {
     const note = notes.find((n) => n.id === id)
     if (!note) return
@@ -1124,7 +1288,7 @@ export default function App() {
     })
   }
   return (
-    <div className="app">
+    <div className={isDesk ? "app is-desk" : "app"}>
       <header className="topbar">
         <button
           aria-label="Outline your day"
@@ -1159,7 +1323,34 @@ export default function App() {
         </div>
       </header>
 
-      {view === "park" && (
+      {view === "park" && isDesk && (
+        <div className="desk-shell no-left">
+          <ParkBoard
+            dateLabel={now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+            draggingId={noteDrag?.id ?? null}
+            dropTag={noteDrag?.over?.kind === "col" ? noteDrag.over.tagId : undefined}
+            inputRef={captureRef}
+            notes={notes}
+            onAdd={addNote}
+            onComplete={(id) => deleteNote(id, true)}
+            onDelete={(id) => deleteNote(id)}
+            onDragStart={startNoteDrag}
+            tags={tags}
+            todayHours={Object.values(outlines[todayKey]?.hours || {}).reduce<Record<string, number>>(
+              (all, id) => (id ? { ...all, [id]: (all[id] || 0) + 1 } : all),
+              {},
+            )}
+          />
+          <TodayRail
+              dateLabel={now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+              now={now}
+              outline={outlines[todayKey]}
+              tags={tags}
+            />
+        </div>
+      )}
+
+      {view === "park" && !isDesk && (
         <Park
           focus={tags.find((tag) => tag.id === outlines[todayKey]?.focus)}
           notes={notes}
@@ -1173,14 +1364,15 @@ export default function App() {
       )}
 
       {view === "plan" && (
-        <>
+        <div className={isDesk ? "desk-shell plan" : undefined} style={isDesk ? undefined : { display: "contents" }}>
           <main
-            className="planner"
+            className={isDesk ? "planner desk-planner" : "planner"}
             ref={plannerRef}
             style={
               {
                 "--split": `${split}fr`,
                 "--rest": `${100 - split}fr`,
+                "--days": calDays.length,
               } as React.CSSProperties
             }
           >
@@ -1217,7 +1409,7 @@ export default function App() {
                 the calendar. Outlined hours only take their own project. Swipe
                 left to delete, right to archive.
               </p>
-              <ParkedToTasks notes={notes} onMake={noteToTask} tags={tags} />
+              {!isDesk && <ParkedToTasks notes={notes} onMake={noteToTask} tags={tags} />}
               <div className="task-list">
                 {open.map((t) => (
                   <TaskCard
@@ -1239,6 +1431,19 @@ export default function App() {
                   />
                 ))}
               </div>
+              {isDesk && (
+                <ParkedRail
+                  draggingId={noteDrag?.id ?? null}
+                  hint="Drag a note onto a calendar slot to schedule it."
+                  inputRef={captureRef}
+                  notes={notes}
+                  onAdd={addNote}
+                  onComplete={(id) => deleteNote(id, true)}
+                  onDelete={(id) => deleteNote(id)}
+                  onDragStart={startNoteDrag}
+                  tags={tags}
+                />
+              )}
             </section>
 
             <div
@@ -1274,6 +1479,21 @@ export default function App() {
                   <h2>Schedule</h2>
                 </div>
                 <div className="cal-nav">
+                  {isDesk && (
+                    <div aria-label="Days shown" className="desk-days-switch" role="group">
+                      {[3, 5, 7].map((n) => (
+                        <button
+                          aria-pressed={planDays === n}
+                          className={planDays === n ? "on" : ""}
+                          key={n}
+                          onClick={() => setPlanDays(n)}
+                          type="button"
+                        >
+                          {n} days
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   {calStart !== todayKey && (
                     <button
                       className="cal-today"
@@ -1345,6 +1565,11 @@ export default function App() {
                               key === todayKey && hour < now.getHours() ? "past" : "",
                               blocked ? "blocked" : "",
                               isTarget ? (blocked ? "target no" : "target") : "",
+                              noteDrag?.over?.kind === "slot" &&
+                              noteDrag.over.date === key &&
+                              noteDrag.over.hour === hour
+                                ? "target"
+                                : "",
                               flashRange?.date === key &&
                               hour >= flashRange.start &&
                               hour < flashRange.end
@@ -1414,10 +1639,72 @@ export default function App() {
               </div>
             </section>
           </main>
-        </>
+          {isDesk && (
+            <TodayRail
+              dateLabel={now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+              now={now}
+              outline={outlines[todayKey]}
+              tags={tags}
+            />
+          )}
+        </div>
       )}
 
-      {view === "home" && (
+      {view === "home" && isDesk && outlineMode === "week" && (
+        <div className="desk-shell">
+          <ParkedRail
+            draggingId={noteDrag?.id ?? null}
+            hint="Drag a note onto a painted hour to sort it into that project."
+            inputRef={captureRef}
+            notes={notes}
+            onAdd={addNote}
+            onComplete={(id) => deleteNote(id, true)}
+            onDelete={(id) => deleteNote(id)}
+            onDragStart={startNoteDrag}
+            tags={tags}
+          />
+          <WeekOutline
+            dropHour={noteDrag?.over?.kind === "hour" ? noteDrag.over : null}
+            now={now}
+            onClearDay={(date) => {
+              const day = outlines[date]
+              setDayOutline(date, day ? { ...day, hours: {} } : null, "Day cleared")
+            }}
+            onCopyPrevious={(date) => {
+              const previous = outlines[addDays(date, -1)]
+              if (!previous || !Object.keys(previous.hours).length) {
+                setToast("The day before has nothing outlined")
+                return
+              }
+              setDayOutline(date, { focus: previous.focus, hours: { ...previous.hours } }, "Copied the previous day")
+            }}
+            onOpenDay={(date) => {
+              setOutlineDate(date)
+              setOutlineMode("day")
+            }}
+            onPaint={paintHour}
+            onShiftWeek={(weeks) => (weeks === 0 ? setOutlineDate(todayKey) : shiftOutlineDay(weeks * 7))}
+            outlines={outlines}
+            tags={tags}
+            todayKey={todayKey}
+            weekStart={mondayOf(outlineDate)}
+          />
+          <TodayRail
+              dateLabel={now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+              now={now}
+              outline={outlines[todayKey]}
+              tags={tags}
+            />
+        </div>
+      )}
+
+      {view === "home" && isDesk && outlineMode === "day" && (
+        <button className="desk-back-week" onClick={() => setOutlineMode("week")} type="button">
+          <Icon name="left" size={14} /> Week view
+        </button>
+      )}
+
+      {view === "home" && (!isDesk || outlineMode === "day") && (
         <OutlineClock
           dateKey={outlineDate}
           notify={setToast}
@@ -1463,6 +1750,7 @@ export default function App() {
       )}
 
       {view === "cooldown" && quickWrap && (
+        <div className={isDesk ? "desk-wrap-split" : undefined} style={isDesk ? undefined : { display: "contents" }}>
         <QuickWrap
           dayLabel={dateFromKey(todayKey).toLocaleDateString("en-US", { weekday: "long" })}
           onChanged={() => setQuickWrap(false)}
@@ -1481,6 +1769,8 @@ export default function App() {
           }}
           parkedCount={notes.length}
         />
+        {isDesk && <WrappedSide outlines={outlines} reviews={reviews} tags={tags} todayKey={todayKey} />}
+        </div>
       )}
 
       {view === "cooldown" && !quickWrap && (
@@ -1895,6 +2185,25 @@ export default function App() {
           )}
         </Modal>
       )}
+      {noteDrag && (
+        <div aria-hidden className="desk-note-ghost" style={{ left: noteDrag.x, top: noteDrag.y }}>
+          {notes.find((n) => n.id === noteDrag.id)?.text}
+          <small>
+            {noteDrag.over?.kind === "slot"
+              ? `Schedule at ${hourLabel(noteDrag.over.hour)}`
+              : noteDrag.over?.kind === "hour"
+                ? (() => {
+                    const id = outlines[noteDrag.over.date]?.hours[noteDrag.over.hour]
+                    const tag = tags.find((t) => t.id === id)
+                    return tag ? `Sort into ${tag.name}` : "Open hour"
+                  })()
+                : noteDrag.over?.kind === "col"
+                  ? `Sort into ${tags.find((t) => t.id === noteDrag.over?.tagId)?.name || "Unsorted"}`
+                  : "Drop on a project, hour or slot"}
+          </small>
+        </div>
+      )}
+
       {taskDrag && dragTask && (
         <div
           aria-hidden
