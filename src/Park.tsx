@@ -388,54 +388,75 @@ export function ParkedToTasks({
 }) {
   const [lengths, setLengths] = useState<Record<number, number>>({})
   const [projects, setProjects] = useState<Record<number, string | null>>({})
+  const [open, setOpen] = useState(true)
   if (!notes.length) return null
   // Notes already sorted on the Outline come first.
   const sorted = [...notes].sort((a, b) => Number(!a.tagId) - Number(!b.tagId))
+  const LENGTHS = [15, 30, 60, 120]
+  const label = (m: number) => (m < 60 ? `${m}m` : `${m / 60}h`)
   return (
-    <section aria-labelledby="parked-tasks-title" className="parked-tasks">
-      <h3 id="parked-tasks-title">From parked · {notes.length}</h3>
-      {sorted.map((note) => {
-        const tagId = note.id in projects ? projects[note.id] : note.tagId ?? null
-        const project = tags.find((tag) => tag.id === tagId)
-        const length = lengths[note.id] || 30
-        return (
-          <div className="parked-task" key={note.id}>
-            <span className="parked-text">{note.text}</span>
-            <div className="parked-controls">
-              <button
-                aria-label={`Project: ${project?.name || "none"}. Tap for the next project.`}
-                className={`quick-tag ${project?.color || "untagged"}`}
-                onClick={() => {
-                  const index = tags.findIndex((tag) => tag.id === tagId)
-                  const next = tags[(index + 1) % (tags.length || 1)]
-                  setProjects((all) => ({ ...all, [note.id]: next?.id ?? null }))
-                }}
-                type="button"
-              >
-                {project?.name || "Project"}
-              </button>
-              {[15, 30, 60, 120].map((m) => (
+    <section className={open ? "parked-tasks open" : "parked-tasks"}>
+      <button
+        aria-controls="parked-rows"
+        aria-expanded={open}
+        className="parked-toggle"
+        onClick={() => setOpen((v) => !v)}
+        type="button"
+      >
+        <span>From parked · {notes.length}</span>
+        <Icon name={open ? "left" : "right"} size={12} />
+      </button>
+      {open && (
+        <ul className="parked-rows" id="parked-rows">
+          {sorted.map((note) => {
+            const tagId = note.id in projects ? projects[note.id] : note.tagId ?? null
+            const project = tags.find((tag) => tag.id === tagId)
+            const length = lengths[note.id] || 30
+            return (
+              <li className="parked-row" key={note.id}>
                 <button
-                  aria-pressed={length === m}
-                  className={length === m ? "parked-len on" : "parked-len"}
-                  key={m}
-                  onClick={() => setLengths((all) => ({ ...all, [note.id]: m }))}
+                  aria-label={`Project: ${project?.name || "none"}. Tap for the next project.`}
+                  className={`parked-dot ${project?.color || "none"}`}
+                  onClick={() => {
+                    const index = tags.findIndex((tag) => tag.id === tagId)
+                    const next = tags[(index + 1) % (tags.length || 1)]
+                    setProjects((all) => ({ ...all, [note.id]: next?.id ?? null }))
+                  }}
+                  title={project?.name || "Pick a project"}
                   type="button"
                 >
-                  {m < 60 ? `${m}m` : `${m / 60}h`}
+                  <i />
                 </button>
-              ))}
-              <button
-                className="parked-make"
-                onClick={() => onMake(note.id, tagId, length)}
-                type="button"
-              >
-                Make task
-              </button>
-            </div>
-          </div>
-        )
-      })}
+                <span className="parked-text" title={note.text}>
+                  {note.text}
+                </span>
+                <button
+                  aria-label={`Length ${label(length)}. Tap to change.`}
+                  className="parked-len"
+                  onClick={() =>
+                    setLengths((all) => ({
+                      ...all,
+                      [note.id]: LENGTHS[(LENGTHS.indexOf(length) + 1) % LENGTHS.length],
+                    }))
+                  }
+                  type="button"
+                >
+                  {label(length)}
+                </button>
+                <button
+                  aria-label={`Make "${note.text}" a task`}
+                  className="parked-make"
+                  onClick={() => onMake(note.id, tagId, length)}
+                  type="button"
+                >
+                  <Icon name="plus" size={14} />
+                  Task
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+      )}
     </section>
   )
 }
@@ -456,6 +477,7 @@ export function QuickWrap({
   onSkip: () => void
   onReviewNotes: () => void
 }) {
+  const [kept, setKept] = useState(false)
   return (
     <main className="quick-wrap">
       <div aria-hidden className="quick-wrap-bar" />
@@ -471,16 +493,23 @@ export function QuickWrap({
         <button className="quick-wrap-answer" onClick={onSkip} type="button">
           Rough day, skip it
         </button>
-        {parkedCount > 0 && (
+        {parkedCount > 0 && !kept && (
           <div className="quick-wrap-notes">
             <p>
               {parkedCount} {parkedCount === 1 ? "note is" : "notes are"} still parked.
-              They'll wait for tomorrow.
             </p>
-            <button onClick={onReviewNotes} type="button">
-              Review them
-            </button>
+            <span className="quick-wrap-note-actions">
+              <button onClick={() => setKept(true)} type="button">
+                Keep for tomorrow
+              </button>
+              <button onClick={onReviewNotes} type="button">
+                Review them
+              </button>
+            </span>
           </div>
+        )}
+        {parkedCount > 0 && kept && (
+          <p className="quick-wrap-kept">Kept. Your notes will be waiting tomorrow.</p>
         )}
         <p className="quick-wrap-foot">
           On Plan depth, this becomes the full block-by-block review.
