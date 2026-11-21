@@ -2015,7 +2015,7 @@ export default function App() {
             />
             {slotProject(createSlot.date, createSlot.hour) ? (
               <div
-                className={`modal-tag fixed ${slotProject(createSlot.date, createSlot.hour)!.color}`}
+                className={`modal-tag locked ${slotProject(createSlot.date, createSlot.hour)!.color}`}
               >
                 <span>{slotProject(createSlot.date, createSlot.hour)!.name}</span>
                 <small>Outlined hour</small>
