@@ -42,7 +42,12 @@ export type DailyReview = {
 /** How much planning the user has room for right now: the depth slider. Saved in `one-depth`. */
 export type Depth = "park" | "outline" | "plan"
 
-/** A parked thought, saved in `one-notes`. Sorted onto a project on the Outline, turned into a task in the Planner. */
+/**
+ * Everything is a note, saved in `one-notes`. A note with a `duration` is a task
+ * (listed in the Planner); one that also has a `date` and `hour` sits on the calendar.
+ * A note with no duration is parked. All extra fields are optional, so notes saved
+ * before this change load unchanged.
+ */
 export type Note = {
   id: number
   text: string
@@ -50,4 +55,17 @@ export type Note = {
   tagId?: string | null
   /** ISO time it was parked. */
   createdAt: string
+  /** Minutes. Set = this note is a task. */
+  duration?: number
+  completed?: boolean
+  hour?: number
+  /** Local YYYY-MM-DD of the scheduled hour. */
+  date?: string
+  completedAt?: string
+  archived?: boolean
+  carried?: boolean
+  /** Sample task shipped with the test build (never synced). */
+  example?: boolean
+  /** ISO time a parked note was swiped done. Done notes leave Park. */
+  doneAt?: string
 }

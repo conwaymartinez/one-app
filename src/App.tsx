@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react"
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import Icon from "./Icon"
 import OutlineClock from "./OutlineClock"
 import Park, { DepthSlider, ParkedToTasks, QuickWrap } from "./Park"
@@ -15,6 +15,7 @@ import {
   type NoteDrop,
 } from "./Desk"
 import Wrapped from "./Wrapped"
+import { applyNotes, applyTasks, fromTask, parkedNotes, patchItem, readItems, scheduleNote, taskList } from "./items"
 import { useSync } from "./sync"
 import type { Color, DailyReview, DayOutline, Depth, Note, Tag, Task } from "./types"
 
@@ -30,26 +31,6 @@ function loadDepth(): Depth {
   }
   return "outline"
 }
-function loadNotes(): Note[] {
-  try {
-    const saved: unknown = JSON.parse(localStorage.getItem("one-notes") || "[]")
-    if (!Array.isArray(saved)) return []
-    return saved
-      .filter(
-        (n): n is Note =>
-          !!n && typeof n === "object" && typeof n.id === "number" && typeof n.text === "string",
-      )
-      .map((n) => ({
-        id: n.id,
-        text: n.text,
-        tagId: typeof n.tagId === "string" ? n.tagId : null,
-        createdAt: typeof n.createdAt === "string" ? n.createdAt : new Date().toISOString(),
-      }))
-  } catch {
-    return []
-  }
-}
-
 const starterTags: Tag[] = [
   { id: "one-app", name: "One app", color: "lavender" },
   { id: "deep-work", name: "Deep work", color: "blue" },
@@ -446,27 +427,28 @@ export default function App() {
       return starterTags
     }
   })
-  const [tasks, setTasks] = useState<Task[]>(() => {
+  // Everything is a note (saved in `one-notes`). Tasks are the notes with a length.
+  const [items, setItems] = useState<Note[]>(() => {
+    let saved: string | null = null
     try {
-      const saved = JSON.parse(
-        localStorage.getItem("one-tasks") || "",
-      ) as Task[]
-      return withDates(
-        saved.map((task) => ({
-          ...task,
-          tagId:
-            task.tagId ??
-            starterTags.find((tag) => tag.name === task.category)?.id ??
-            null,
-        })),
-      )
+      saved = localStorage.getItem("one-notes")
     } catch {
-      return withDates(seed)
+      // Storage blocked; start with the samples.
     }
+    return readItems(saved, localDateKey()) ?? withDates(seed).map((task) => fromTask(task))
   })
+  const tasks = useMemo(() => taskList(items), [items])
+  const notes = useMemo(() => parkedNotes(items), [items])
+  const setTasks = useCallback(
+    (update: Task[] | ((current: Task[]) => Task[])) => setItems((all) => applyTasks(all, update)),
+    [],
+  )
+  const setNotes = useCallback(
+    (update: Note[] | ((current: Note[]) => Note[])) => setItems((all) => applyNotes(all, update)),
+    [],
+  )
   const [depth, setDepth] = useState<Depth>(loadDepth)
   const [view, setView] = useState<View>(() => depthView[depth])
-  const [notes, setNotes] = useState<Note[]>(loadNotes)
   const [quickWrap, setQuickWrap] = useState(false)
   // Desktop: three panels, the week on Outline, more days on Plan, notes dragged anywhere.
   const isDesk = useIsDesk()
@@ -597,11 +579,6 @@ export default function App() {
   }, [tags])
   useEffect(() => {
     try {
-      localStorage.setItem("one-tasks", JSON.stringify(tasks))
-    } catch {}
-  }, [tasks])
-  useEffect(() => {
-    try {
       localStorage.setItem("one-outlines", JSON.stringify(outlines))
     } catch {
       // Storage full or blocked; the outline still works for this session.
@@ -679,11 +656,11 @@ export default function App() {
   })
   useEffect(() => {
     try {
-      localStorage.setItem("one-notes", JSON.stringify(notes))
+      localStorage.setItem("one-notes", JSON.stringify(items))
     } catch {
       // Storage full or blocked; notes still work for this session.
     }
-  }, [notes])
+  }, [items])
   useEffect(() => {
     try {
       localStorage.setItem("one-plan-days", String(planDays))
@@ -707,15 +684,14 @@ export default function App() {
   }, [reviews])
   // Optional sync between devices (off until a token is connected in More).
   const syncData = useMemo(
-    () => ({ tags, tasks, outlines, reviews, notes }),
-    [tags, tasks, outlines, reviews, notes],
+    () => ({ tags, outlines, reviews, notes: items }),
+    [tags, outlines, reviews, items],
   )
   const sync = useSync(syncData, (next) => {
     setTags(next.tags)
-    setTasks(next.tasks)
     setOutlines(next.outlines)
     setReviews(next.reviews)
-    setNotes(next.notes)
+    setItems(next.notes)
   }, starterTags)
   const [syncToken, setSyncToken] = useState("")
   useEffect(() => {
@@ -1151,11 +1127,25 @@ export default function App() {
     ])
     setToast("Parked")
   }
-  /** Remove a parked note. `done` only changes the message: notes have no done state yet. */
+  /** Done keeps the note (with `doneAt`) out of Park; delete removes it. Both can be undone. */
   function deleteNote(id: number, done = false) {
     const index = notes.findIndex((n) => n.id === id)
     const note = notes[index]
     if (!note) return
+    if (done) {
+      const doneAt = new Date().toISOString()
+      setItems((all) => patchItem(all, id, (n) => ({ ...n, doneAt })))
+      showUndo(`Done: ${note.text}`, () =>
+        setItems((all) =>
+          patchItem(all, id, (n) => {
+            const back = { ...n }
+            delete back.doneAt
+            return back
+          }),
+        ),
+      )
+      return
+    }
     setNotes((all) => all.filter((n) => n.id !== id))
     showUndo(done ? `Done: ${note.text}` : "Note removed", () =>
       setNotes((all) => {
@@ -1192,19 +1182,14 @@ export default function App() {
       assignNote(id, tagId)
       return
     }
-    // A calendar slot: the note becomes a 30-minute task there.
+    // A calendar slot: the same note gets 30 minutes there.
     const slotTag = outlines[target.date]?.hours[target.hour]
     const tagId = slotTag && tags.some((tag) => tag.id === slotTag) ? slotTag : note.tagId ?? null
-    const taskId = Date.now()
-    setTasks((all) => [
-      ...all,
-      { id: taskId, title: note.text, duration: 30, tagId, completed: false, date: target.date, hour: target.hour },
-    ])
-    setNotes((all) => all.filter((n) => n.id !== id))
-    showUndo(`Scheduled ${dayName(target.date).toLowerCase()} at ${hourLabel(target.hour)}`, () => {
-      setTasks((all) => all.filter((t) => t.id !== taskId))
-      setNotes((all) => (all.some((n) => n.id === id) ? all : [note, ...all]))
-    })
+    const slot = { date: target.date, hour: target.hour }
+    setItems((all) => patchItem(all, id, (n) => scheduleNote(n, tagId, 30, slot)))
+    showUndo(`Scheduled ${dayName(target.date).toLowerCase()} at ${hourLabel(target.hour)}`, () =>
+      setItems((all) => patchItem(all, id, () => note)),
+    )
   }
   /** Paint one hour of any day (desktop week view). */
   function paintHour(date: string, hour: number, tagId: string | null) {
@@ -1240,16 +1225,9 @@ export default function App() {
   function noteToTask(id: number, tagId: string | null, duration: number) {
     const note = notes.find((n) => n.id === id)
     if (!note) return
-    const taskId = Date.now()
-    setTasks((all) => [
-      ...all,
-      { id: taskId, title: note.text, duration, tagId, completed: false },
-    ])
-    setNotes((all) => all.filter((n) => n.id !== id))
-    showUndo("Made a task", () => {
-      setTasks((all) => all.filter((t) => t.id !== taskId))
-      setNotes((all) => (all.some((n) => n.id === id) ? all : [note, ...all]))
-    })
+    // Same note, now with a length: it moves to the task list.
+    setItems((all) => patchItem(all, id, (n) => scheduleNote(n, tagId, duration)))
+    showUndo("Added to your list", () => setItems((all) => patchItem(all, id, () => note)))
   }
   /** Check a task on or off from the review. A past day gets a time on that day so it counts there. */
   function setTaskDone(id: number, done: boolean, dateKey: string) {
@@ -2039,10 +2017,9 @@ export default function App() {
                 // Resetting must not wipe the synced copy, so disconnect first.
                 if (sync.connected) sync.disconnect()
                 setTags(starterTags)
-                setTasks(withDates(seed))
+                setItems(withDates(seed).map((task) => fromTask(task)))
                 setOutlines({})
                 setReviews({})
-                setNotes([])
                 setDepth("outline")
                 setSelectedTagId(starterTags[0].id)
                 setOutlineDate(todayKey)
