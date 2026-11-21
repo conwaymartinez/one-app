@@ -805,7 +805,7 @@ button.next-row.to-planner>.icon { color: var(--faint); }
 /* ── Park: just capture ─────────────────────────────────────────────── */
 .park { display: flex; flex-direction: column; gap: 24px; margin: 0 auto; max-width: 640px; padding: 32px 20px 120px; }
 .park-today { align-items: center; color: var(--muted); display: flex; font-size: 13px; gap: 8px; }
-.park-today i, .park-list li>i { border-radius: 3px; flex: 0 0 auto; height: 10px; width: 10px; }
+.park-today i, .park-swipe-body>i { border-radius: 3px; flex: 0 0 auto; height: 10px; width: 10px; }
 .park-today i.open { background: var(--strong-line); }
 .park-today i.sage, .park-list i.sage { background: var(--sage-dark); } .park-today i.peach, .park-list i.peach { background: var(--peach-dark); }
 .park-today i.lavender, .park-list i.lavender { background: var(--lavender-dark); } .park-today i.blue, .park-list i.blue { background: var(--blue-dark); }
@@ -818,11 +818,22 @@ button.next-row.to-planner>.icon { color: var(--faint); }
 .park-list-head { align-items: baseline; display: flex; justify-content: space-between; margin-bottom: 10px; }
 .park-list-head h2, .park-list-head span { color: var(--faint); font: 500 10px "DM Mono", monospace; letter-spacing: .1em; text-transform: uppercase; }
 .park-list ul { border: 1px solid var(--line); border-radius: 14px; list-style: none; margin: 0; overflow: hidden; padding: 0; }
-.park-list li { align-items: center; display: flex; font-size: 15px; gap: 10px; min-height: 50px; padding: 4px 4px 4px 14px; }
+.park-list li { font-size: 15px; position: relative; }
 .park-list li+li { border-top: 1px solid var(--line); }
-.park-list li>span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.park-list li>button { align-items: center; background: none; border: 0; border-radius: 10px; color: var(--faint); display: flex; height: 44px; justify-content: center; width: 44px; }
-.park-list li>button:hover, .park-list li>button:focus-visible { color: var(--alert); outline: 0; }
+.park-swipe { touch-action: pan-y; user-select: none; -webkit-user-select: none; }
+.park-swipe.swiping { overflow: hidden; }
+.park-swipe-body { align-items: center; background: var(--paper); display: flex; gap: 10px; min-height: 50px; padding: 4px 4px 4px 14px; position: relative; }
+.park-swipe-body>span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.park-swipe-body>button { align-items: center; background: none; border: 0; border-radius: 10px; color: var(--faint); display: flex; height: 44px; justify-content: center; width: 44px; }
+.park-swipe-body>button:hover, .park-swipe-body>button:focus-visible { color: var(--alert); outline: 0; }
+.park-swipe-actions { align-items: center; display: none; font-size: 13px; font-weight: 700; inset: 0; justify-content: space-between; letter-spacing: -.01em; padding: 0 18px; position: absolute; transition: background .15s ease, color .15s ease; }
+.park-swipe-actions span { align-items: center; display: flex; gap: 6px; }
+.park-swipe.swiping .park-swipe-actions { display: flex; }
+.park-swipe.to-done .park-swipe-actions { background: var(--sage); color: var(--sage-dark); }
+.park-swipe.to-delete .park-swipe-actions { background: var(--peach); color: var(--peach-dark); }
+.park-swipe.to-done .park-swipe-delete, .park-swipe.to-delete .park-swipe-done { visibility: hidden; }
+.park-swipe.to-done.armed .park-swipe-actions { background: var(--sage-dark); color: var(--day-ink, #141613); }
+.park-swipe.to-delete.armed .park-swipe-actions { background: var(--alert); color: #fff; }
 .park-empty { color: var(--faint); font-size: 14px; }
 .park-next { color: var(--faint); font-size: 13px; line-height: 1.5; }
 .park-next button { background: none; border: 0; color: var(--ink); padding: 0; text-decoration: underline; text-underline-offset: 3px; }

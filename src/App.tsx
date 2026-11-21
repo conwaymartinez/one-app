@@ -1052,12 +1052,13 @@ export default function App() {
     ])
     setToast("Parked")
   }
-  function deleteNote(id: number) {
+  /** Remove a parked note. `done` only changes the message: notes have no done state yet. */
+  function deleteNote(id: number, done = false) {
     const index = notes.findIndex((n) => n.id === id)
     const note = notes[index]
     if (!note) return
     setNotes((all) => all.filter((n) => n.id !== id))
-    showUndo("Note removed", () =>
+    showUndo(done ? `Done: ${note.text}` : "Note removed", () =>
       setNotes((all) => {
         if (all.some((n) => n.id === id)) return all
         const copy = [...all]
@@ -1162,7 +1163,8 @@ export default function App() {
           focus={tags.find((tag) => tag.id === outlines[todayKey]?.focus)}
           notes={notes}
           onAdd={addNote}
-          onDelete={deleteNote}
+          onComplete={(id) => deleteNote(id, true)}
+          onDelete={(id) => deleteNote(id)}
           onOutline={() => goDepth("outline")}
           outlinedHours={Object.keys(outlines[todayKey]?.hours || {}).length}
           tags={tags}

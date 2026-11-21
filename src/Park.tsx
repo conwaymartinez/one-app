@@ -1,4 +1,4 @@
-import { FormEvent, useState } from "react"
+import { FormEvent, useRef, useState } from "react"
 import Icon from "./Icon"
 import type { Depth, Note, Tag } from "./types"
 
@@ -45,6 +45,7 @@ export default function Park({
   focus,
   outlinedHours,
   onAdd,
+  onComplete,
   onDelete,
   onOutline,
 }: {
@@ -53,6 +54,9 @@ export default function Park({
   focus: Tag | undefined
   outlinedHours: number
   onAdd: (text: string) => void
+  /** Swipe right: the note is done. */
+  onComplete: (id: number) => void
+  /** Swipe left or the remove button. */
   onDelete: (id: number) => void
   onOutline: () => void
 }) {
@@ -95,26 +99,19 @@ export default function Park({
       <section aria-labelledby="parked-title" className="park-list">
         <div className="park-list-head">
           <h2 id="parked-title">Parked · {notes.length}</h2>
-          {notes.length > 0 && <span>Sort them on Outline</span>}
+          {notes.length > 0 && <span>Swipe → done · ← delete</span>}
         </div>
         {notes.length ? (
           <ul>
-            {notes.map((note) => {
-              const project = byId(note.tagId)
-              return (
-                <li key={note.id}>
-                  {project && <i className={project.color} title={project.name} />}
-                  <span>{note.text}</span>
-                  <button
-                    aria-label={`Remove "${note.text}"`}
-                    onClick={() => onDelete(note.id)}
-                    type="button"
-                  >
-                    <Icon name="close" size={14} />
-                  </button>
-                </li>
-              )
-            })}
+            {notes.map((note) => (
+              <SwipeNote
+                key={note.id}
+                note={note}
+                onComplete={onComplete}
+                onDelete={onDelete}
+                project={byId(note.tagId)}
+              />
+            ))}
           </ul>
         ) : (
           <p className="park-empty">Nothing parked. Your head is clear.</p>
@@ -131,6 +128,113 @@ export default function Park({
         </p>
       )}
     </main>
+  )
+}
+
+/** One parked note. Swipe right to mark it done, left to delete. */
+function SwipeNote({
+  note,
+  project,
+  onComplete,
+  onDelete,
+}: {
+  note: Note
+  project: Tag | undefined
+  onComplete: (id: number) => void
+  onDelete: (id: number) => void
+}) {
+  const [dx, setDx] = useState(0)
+  const [leaving, setLeaving] = useState<-1 | 0 | 1>(0)
+  const swipe = useRef<{ pointerId: number; x0: number; y0: number; on: boolean; width: number } | null>(null)
+  const swipedAt = useRef(0)
+  const threshold = (width: number) => Math.min(120, width * 0.33)
+  const width = swipe.current?.width ?? 0
+  const armed = width > 0 && Math.abs(dx) > threshold(width)
+  function down(e: React.PointerEvent<HTMLLIElement>) {
+    if (leaving || (e.pointerType === "mouse" && e.button !== 0)) return
+    swipe.current = {
+      pointerId: e.pointerId,
+      x0: e.clientX,
+      y0: e.clientY,
+      on: false,
+      width: e.currentTarget.offsetWidth,
+    }
+  }
+  function move(e: React.PointerEvent<HTMLLIElement>) {
+    const s = swipe.current
+    if (!s || s.pointerId !== e.pointerId) return
+    const mx = e.clientX - s.x0
+    const my = e.clientY - s.y0
+    if (!s.on) {
+      if (Math.abs(mx) < 10 && Math.abs(my) < 10) return
+      // Mostly vertical: leave it to scrolling.
+      if (Math.abs(my) >= Math.abs(mx)) {
+        swipe.current = null
+        return
+      }
+      s.on = true
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId)
+      } catch {}
+    }
+    if (Math.abs(mx) > threshold(s.width) !== Math.abs(dx) > threshold(s.width)) navigator.vibrate?.(8)
+    setDx(mx)
+  }
+  function end(e: React.PointerEvent<HTMLLIElement>) {
+    const s = swipe.current
+    if (!s || s.pointerId !== e.pointerId) return
+    swipe.current = null
+    if (!s.on) return
+    swipedAt.current = Date.now()
+    if (e.type === "pointerup" && Math.abs(dx) > threshold(s.width)) {
+      const dir = dx < 0 ? -1 : 1
+      setLeaving(dir)
+      window.setTimeout(() => (dir < 0 ? onDelete(note.id) : onComplete(note.id)), 200)
+    } else setDx(0)
+  }
+  const active = dx !== 0 || leaving !== 0
+  const toDelete = dx < 0 || leaving < 0
+  return (
+    <li
+      className={`park-swipe ${active ? "swiping" : ""} ${toDelete ? "to-delete" : "to-done"} ${
+        armed || leaving ? "armed" : ""
+      }`}
+      onClickCapture={(e) => {
+        // A swipe shouldn't also tap the button it ended on.
+        if (Date.now() - swipedAt.current < 350) {
+          e.preventDefault()
+          e.stopPropagation()
+        }
+      }}
+      onPointerCancel={end}
+      onPointerDown={down}
+      onPointerMove={move}
+      onPointerUp={end}
+    >
+      <div aria-hidden className="park-swipe-actions">
+        <span className="park-swipe-done">
+          <Icon name="check" size={14} /> Done
+        </span>
+        <span className="park-swipe-delete">Delete</span>
+      </div>
+      <div
+        className="park-swipe-body"
+        style={
+          active
+            ? {
+                transform: `translateX(${leaving ? `${leaving * 110}%` : `${dx}px`})`,
+                transition: swipe.current?.on ? "none" : "transform .2s ease",
+              }
+            : undefined
+        }
+      >
+        {project && <i className={project.color} title={project.name} />}
+        <span>{note.text}</span>
+        <button aria-label={`Remove "${note.text}"`} onClick={() => onDelete(note.id)} type="button">
+          <Icon name="close" size={14} />
+        </button>
+      </div>
+    </li>
   )
 }
 
