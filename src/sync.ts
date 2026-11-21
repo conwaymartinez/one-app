@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import type { Color, DailyReview, DayOutline, Tag, Task } from "./types"
+import type { Color, DailyReview, DayOutline, Note, Tag, Task } from "./types"
 
 /**
  * Optional sync through a secret GitHub Gist.
  *
- * Every tag, task, day outline and day review is one "entry" with an
+ * Every tag, task, parked note, day outline and day review is one "entry" with an
  * `updatedAt` time. Devices merge entry by entry (newest wins; deletions are
  * kept as tombstones), so existing saved data and its shapes are unchanged.
  * The token and gist id live only in this browser's localStorage.
@@ -15,6 +15,7 @@ export type SyncData = {
   tasks: Task[]
   outlines: Record<string, DayOutline>
   reviews: Record<string, DailyReview>
+  notes: Note[]
 }
 
 type Entry = { t: number; d?: true; v?: unknown }
@@ -70,6 +71,7 @@ function toValues(data: SyncData): Record<string, unknown> {
     values[`outline:${day}`] = outline
   for (const [day, review] of Object.entries(data.reviews))
     values[`review:${day}`] = review
+  for (const note of data.notes) values[`note:${note.id}`] = note
   return values
 }
 
@@ -135,6 +137,16 @@ function isReview(value: any): value is DailyReview {
   return !!value && typeof value === "object" && Array.isArray(value.rests)
 }
 
+function isNote(value: any): value is Note {
+  return (
+    !!value &&
+    typeof value.id === "number" &&
+    typeof value.text === "string" &&
+    typeof value.createdAt === "string" &&
+    (value.tagId === undefined || value.tagId === null || typeof value.tagId === "string")
+  )
+}
+
 /** Keep remote entries that look like real data; drop anything malformed. */
 export function cleanRemote(raw: unknown): Entries {
   const items = (raw as { items?: unknown } | null)?.items
@@ -152,7 +164,8 @@ export function cleanRemote(raw: unknown): Entries {
       (kind === "tag" && isTag(entry.v)) ||
       (kind === "task" && isTask(entry.v)) ||
       (kind === "outline" && dateKey.test(id) && isOutline(entry.v)) ||
-      (kind === "review" && dateKey.test(id) && isReview(entry.v))
+      (kind === "review" && dateKey.test(id) && isReview(entry.v)) ||
+      (kind === "note" && isNote(entry.v))
     if (ok) clean[key] = { t: entry.t, v: entry.v }
   }
   return clean
@@ -180,6 +193,13 @@ export function materialize(merged: Entries, local: SyncData): SyncData {
     if (value) tasks.push(value)
     seenTasks.add(task.id)
   }
+  const notes: Note[] = []
+  const seenNotes = new Set<number>()
+  for (const note of local.notes) {
+    const value = live(`note:${note.id}`) as Note | undefined
+    if (value) notes.push(value)
+    seenNotes.add(note.id)
+  }
   const outlines: Record<string, DayOutline> = {}
   const reviews: Record<string, DailyReview> = {}
   for (const key of Object.keys(merged)) {
@@ -191,8 +211,11 @@ export function materialize(merged: Entries, local: SyncData): SyncData {
     if (kind === "task" && !seenTasks.has(Number(id))) tasks.push(value as Task)
     if (kind === "outline") outlines[id] = value as DayOutline
     if (kind === "review") reviews[id] = value as DailyReview
+    if (kind === "note" && !seenNotes.has(Number(id))) notes.push(value as Note)
   }
-  return { tags, tasks, outlines, reviews }
+  // Parked notes are listed newest first, wherever they were parked.
+  notes.sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
+  return { tags, tasks, outlines, reviews, notes }
 }
 
 async function github(

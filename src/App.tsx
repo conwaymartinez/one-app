@@ -611,14 +611,15 @@ export default function App() {
   }, [reviews])
   // Optional sync between devices (off until a token is connected in More).
   const syncData = useMemo(
-    () => ({ tags, tasks, outlines, reviews }),
-    [tags, tasks, outlines, reviews],
+    () => ({ tags, tasks, outlines, reviews, notes }),
+    [tags, tasks, outlines, reviews, notes],
   )
   const sync = useSync(syncData, (next) => {
     setTags(next.tags)
     setTasks(next.tasks)
     setOutlines(next.outlines)
     setReviews(next.reviews)
+    setNotes(next.notes)
   }, starterTags)
   const [syncToken, setSyncToken] = useState("")
   useEffect(() => {
