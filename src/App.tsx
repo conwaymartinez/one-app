@@ -15,7 +15,7 @@ import {
   type NoteDrop,
 } from "./Desk"
 import Wrapped from "./Wrapped"
-import { applyNotes, applyTasks, fromTask, parkedNotes, patchItem, readItems, scheduleNote, taskList } from "./items"
+import { applyNotes, applyTasks, fromTask, isTaskItem, parkItem, parkUnscheduled, parkedNotes, patchItem, readItems, scheduleNote, taskList, toTask } from "./items"
 import { useSync } from "./sync"
 import type { Color, DailyReview, DayOutline, Depth, Note, Tag, Task } from "./types"
 
@@ -73,6 +73,12 @@ const seed: Task[] = [
     hour: 14,
   },
 ]
+/** Sample tasks for a first visit or a reset: only the ones with a time (there is no task list). */
+function sampleItems() {
+  return withDates(seed)
+    .filter((task) => task.hour !== undefined)
+    .map((task) => fromTask(task))
+}
 const allHours = Array.from({ length: 24 }, (_, i) => i)
 /** Set to false to hide the Wrapped tab. */
 const SHOW_WRAPPED = true
@@ -435,7 +441,7 @@ export default function App() {
     } catch {
       // Storage blocked; start with the samples.
     }
-    return readItems(saved, localDateKey()) ?? withDates(seed).map((task) => fromTask(task))
+    return parkUnscheduled(readItems(saved, localDateKey()) ?? sampleItems())
   })
   const tasks = useMemo(() => taskList(items), [items])
   const notes = useMemo(() => parkedNotes(items), [items])
@@ -477,7 +483,9 @@ export default function App() {
   const [tagTarget, setTagTarget] = useState<number | "new" | null>(null)
   const [manageTags, setManageTags] = useState(false)
   const [newTagName, setNewTagName] = useState("")
-  const [scheduleTask, setScheduleTask] = useState<Task | null>(null)
+  /** The one sheet for a note: pick a time (parked) or change it (on the calendar). */
+  const [sheet, setSheet] = useState<{ id: number; duration: number; tagId: string | null } | null>(null)
+  const [sheetTitle, setSheetTitle] = useState("")
   const [createSlot, setCreateSlot] = useState<{
     date: string
     hour: number
@@ -502,6 +510,11 @@ export default function App() {
     fromCalendar?: boolean
     /** Touch long-press timer; the drag only starts once it fires. */
     pending?: number
+    /** Done blocks: a tap opens the sheet, they don't drag. */
+    tapOnly?: boolean
+    /** A parked note dragged from Plan: its chosen length and project. */
+    duration?: number
+    tagId?: string | null
   } | null>(null)
   const swipeRef = useRef<{
     pointerId: number
@@ -691,7 +704,7 @@ export default function App() {
     setTags(next.tags)
     setOutlines(next.outlines)
     setReviews(next.reviews)
-    setItems(next.notes)
+    setItems(parkUnscheduled(next.notes))
   }, starterTags)
   const [syncToken, setSyncToken] = useState("")
   useEffect(() => {
@@ -720,16 +733,22 @@ export default function App() {
   const planned = scheduled
     .filter((t) => t.date && calDays.includes(t.date))
     .reduce((sum, t) => sum + t.duration, 0)
-  const dragTask = taskDrag ? tasks.find((t) => t.id === taskDrag.id) : undefined
+  const dragItem = taskDrag ? items.find((n) => n.id === taskDrag.id) : undefined
+  const dragTask = dragItem ? toTask(dragItem) : undefined
+  const sheetItem = sheet ? items.find((n) => n.id === sheet.id) : undefined
+  const sheetOnCal = !!sheetItem && isTaskItem(sheetItem) && sheetItem.hour !== undefined
+  const sheetTagId = sheetOnCal ? sheetItem!.tagId ?? null : sheet?.tagId ?? null
+  const sheetDuration = sheetOnCal ? sheetItem!.duration ?? 30 : sheet?.duration ?? 30
+  const sheetProject = tags.find((tag) => tag.id === sheetTagId)
   /** The project the home outline gives this hour, if any. */
   const slotProject = (dateKey: string, hour: number) => {
     const id = outlines[dateKey]?.hours[hour]
     return id ? tags.find((tag) => tag.id === id) : undefined
   }
-  /** Outlined hours only take tasks from their own project. */
-  const canPlace = (task: Task, dateKey: string, hour: number) => {
+  /** Outlined hours only take their own project. A note with no project takes the hour's. */
+  const canPlace = (task: { tagId: string | null }, dateKey: string, hour: number) => {
     const project = slotProject(dateKey, hour)
-    return !project || project.id === task.tagId
+    return !project || !task.tagId || project.id === task.tagId
   }
   // The block an Up next row stands for, highlighted briefly in the planner.
   const flashRange = (() => {
@@ -829,32 +848,53 @@ export default function App() {
       ),
     )
   }
-  function schedule(id: number, dateKey: string, hour: number) {
-    const task = tasks.find((t) => t.id === id)
-    if (!task) return
-    if (!canPlace(task, dateKey, hour)) {
-      setToast(`${hourLabel(hour)} is outlined for ${slotProject(dateKey, hour)?.name}`)
+  /** Put a note on the calendar (or move it). Works for parked notes and scheduled ones. */
+  function schedule(
+    id: number,
+    dateKey: string,
+    hour: number,
+    opts: { duration?: number; tagId?: string | null } = {},
+  ) {
+    const item = items.find((n) => n.id === id)
+    if (!item) return
+    const wanted = opts.tagId !== undefined ? opts.tagId : item.tagId ?? null
+    const project = slotProject(dateKey, hour)
+    if (!canPlace({ tagId: wanted }, dateKey, hour)) {
+      setToast(`${hourLabel(hour)} is outlined for ${project?.name}`)
       return
     }
-    setTasks((all) =>
-      all.map((t) => (t.id === id ? { ...t, hour, date: dateKey } : t)),
+    const tagId = wanted ?? project?.id ?? null
+    const duration = opts.duration ?? item.duration ?? 30
+    setItems((all) => patchItem(all, id, (n) => scheduleNote(n, tagId, duration, { date: dateKey, hour })))
+    setSheet(null)
+    showUndo(`Scheduled ${dayName(dateKey).toLowerCase()} at ${hourLabel(hour)}`, () =>
+      setItems((all) => patchItem(all, id, () => item)),
     )
-    setScheduleTask(null)
-    setToast(`Scheduled ${dayName(dateKey).toLowerCase()} at ${hourLabel(hour)}`)
   }
+  /** Off the calendar and back to Park, as the same note. */
   function unschedule(id: number) {
-    setTasks((all) =>
-      all.map((t) =>
-        // Taking an archived task off the calendar brings it back to the list,
-        // so it never vanishes from both places at once.
-        t.id === id ? { ...t, hour: undefined, date: undefined, archived: undefined } : t,
-      ),
-    )
-    setToast("Moved back to your task list")
+    const item = items.find((n) => n.id === id)
+    if (!item) return
+    setItems((all) => patchItem(all, id, parkItem))
+    setSheet(null)
+    showUndo("Back in Park", () => setItems((all) => patchItem(all, id, () => item)))
   }
-  function openSchedule(task: Task) {
-    setScheduleDay(task.date && calDays.includes(task.date) ? task.date : calDays[0])
-    setScheduleTask(task)
+  function openSheet(id: number, duration?: number, tagId?: string | null) {
+    const item = items.find((n) => n.id === id)
+    if (!item) return
+    setScheduleDay(item.date && calDays.includes(item.date) ? item.date : calDays[0])
+    setSheet({
+      id,
+      duration: duration ?? item.duration ?? 30,
+      tagId: tagId !== undefined ? tagId : item.tagId ?? null,
+    })
+    setSheetTitle(item.text)
+    setConfirmDelete(false)
+  }
+  /** Change a note on the calendar from its sheet. */
+  function patchSheetItem(change: (n: Note) => Note) {
+    if (!sheet) return
+    setItems((all) => patchItem(all, sheet.id, change))
   }
 
   // Dragging a task onto the calendar. Pointer events, so it works on touch:
@@ -884,10 +924,34 @@ export default function App() {
       y0: e.clientY,
       started: false,
       fromCalendar: true,
+      tapOnly: task.completed,
     } as NonNullable<typeof dragRef.current>
     // Also stops the browser's follow-up mouse events, which would otherwise
     // land on the popup a tap opens.
     e.preventDefault()
+    if (e.pointerType !== "mouse" && !d.tapOnly)
+      d.pending = window.setTimeout(() => {
+        if (dragRef.current !== d) return
+        d.started = true
+        d.pending = undefined
+        navigator.vibrate?.(12)
+        setTaskDrag({ id: d.id, x: d.x0, y: d.y0, target: null })
+      }, 380)
+    dragRef.current = d
+  }
+  // A parked note on Plan (phones): long-press and drag it onto an hour.
+  function startParkedDrag(e: React.PointerEvent, id: number, duration: number, tagId: string | null) {
+    const target = e.target as HTMLElement
+    if (e.button !== 0 || target.closest("button")) return
+    const d = {
+      id,
+      pointerId: e.pointerId,
+      x0: e.clientX,
+      y0: e.clientY,
+      started: false,
+      duration,
+      tagId,
+    } as NonNullable<typeof dragRef.current>
     if (e.pointerType !== "mouse")
       d.pending = window.setTimeout(() => {
         if (dragRef.current !== d) return
@@ -907,6 +971,10 @@ export default function App() {
     const d = dragRef.current
     if (!d || e.pointerId !== d.pointerId) return
     const moved = Math.hypot(e.clientX - d.x0, e.clientY - d.y0)
+    if (d.tapOnly) {
+      if (moved > 8) dragRef.current = null
+      return
+    }
     if (d.pending !== undefined) {
       // Finger moved before the long-press: it's a scroll or swipe, not a drag.
       if (moved > 8) {
@@ -948,11 +1016,14 @@ export default function App() {
     if (d.started && e.type === "pointerup") {
       const under = document.elementFromPoint(e.clientX, e.clientY)
       const slot = under?.closest<HTMLElement>("[data-slot]")
-      if (slot) schedule(d.id, slot.dataset.date!, Number(slot.dataset.hour))
+      if (slot)
+        schedule(d.id, slot.dataset.date!, Number(slot.dataset.hour), {
+          duration: d.duration,
+          tagId: d.tagId,
+        })
       else if (d.fromCalendar && under?.closest(".task-panel")) unschedule(d.id)
     } else if (!d.started && d.fromCalendar && e.type === "pointerup") {
-      const task = tasks.find((t) => t.id === d.id)
-      if (task && Math.hypot(e.clientX - d.x0, e.clientY - d.y0) < 8) openSchedule(task)
+      if (Math.hypot(e.clientX - d.x0, e.clientY - d.y0) < 8) openSheet(d.id)
     }
     setTaskDrag(null)
   }
@@ -1222,12 +1293,9 @@ export default function App() {
       }),
     )
   }
+  /** "+ Task" on a parked note: straight to choosing a time. */
   function noteToTask(id: number, tagId: string | null, duration: number) {
-    const note = notes.find((n) => n.id === id)
-    if (!note) return
-    // Same note, now with a length: it moves to the task list.
-    setItems((all) => patchItem(all, id, (n) => scheduleNote(n, tagId, duration)))
-    showUndo("Added to your list", () => setItems((all) => patchItem(all, id, () => note)))
+    openSheet(id, duration, tagId)
   }
   /** Check a task on or off from the review. A past day gets a time on that day so it counts there. */
   function setTaskDone(id: number, done: boolean, dateKey: string) {
@@ -1355,60 +1423,49 @@ export default function App() {
             }
           >
             <section className="task-panel">
-              <div className="heading">
-                <div>
-                  <small>Your list</small>
-                  <h1>Tasks</h1>
-                </div>
-                <span className="count">{open.length}</span>
-              </div>
-              <form className="quick-add" onSubmit={add}>
-                <Icon name="plus" />
-                <input
-                  aria-label="Add a task"
-                  onChange={(e) => setText(e.target.value)}
-                  placeholder="Add something to your day"
-                  value={text}
-                />
-                <button
-                  aria-label={`Current project: ${selectedTag?.name || "none"}. Tap to choose the next project.`}
-                  className={`quick-tag ${selectedTag?.color || "untagged"}`}
-                  onClick={cycleSelectedTag}
-                  type="button"
-                >
-                  {selectedTag?.name || "Project"}
-                </button>
-                <button className="quick-submit" type="submit">
-                  Add
-                </button>
-              </form>
-              <p className="hint">
-                <Icon name="sparkle" size={14} /> Drag a task by its handle onto
-                the calendar. Outlined hours only take their own project. Swipe
-                left to delete, right to archive.
-              </p>
-              {!isDesk && <ParkedToTasks notes={notes} onMake={noteToTask} tags={tags} />}
-              <div className="task-list">
-                {open.map((t) => (
-                  <TaskCard
-                    chooseTag={setTagTarget}
-                    chooseTime={openSchedule}
-                    edit={(task) => {
-                      setConfirmDelete(false)
-                      setEditTask({ id: task.id, title: task.title })
+              {!isDesk && (
+                <>
+                  <div className="heading">
+                    <div>
+                      <small>Not on the calendar yet</small>
+                      <h1>Parked</h1>
+                    </div>
+                    <span className="count">{notes.length}</span>
+                  </div>
+                  <form
+                    className="quick-add"
+                    onSubmit={(e) => {
+                      e.preventDefault()
+                      if (!text.trim()) return
+                      addNote(text.trim())
+                      setText("")
                     }}
-                    dragging={taskDrag?.id === t.id}
-                    key={t.id}
-                    onSwipe={(task, action) =>
-                      action === "delete" ? deleteTask(task.id) : archiveTask(task.id)
-                    }
-                    startDrag={startTaskDrag}
-                    tag={tagFor(t)}
-                    task={t}
-                    toggle={toggle}
+                  >
+                    <Icon name="plus" />
+                    <input
+                      aria-label="Park a thought"
+                      onChange={(e) => setText(e.target.value)}
+                      placeholder="Park a thought"
+                      value={text}
+                    />
+                    <button className="quick-submit" type="submit">
+                      Park
+                    </button>
+                  </form>
+                  <p className="hint">
+                    <Icon name="sparkle" size={14} /> Tap + Task to pick a time, or hold a
+                    note and drag it onto the calendar. Tap anything on the calendar to
+                    change it.
+                  </p>
+                  <ParkedToTasks
+                    bare
+                    notes={notes}
+                    onDragStart={startParkedDrag}
+                    onMake={noteToTask}
+                    tags={tags}
                   />
-                ))}
-              </div>
+                </>
+              )}
               {isDesk && (
                 <ParkedRail
                   draggingId={noteDrag?.id ?? null}
@@ -1585,7 +1642,7 @@ export default function App() {
                                   taskDrag?.id === t.id ? "dragging" : ""
                                 }`}
                                 key={t.id}
-                                onPointerDown={(e) => !t.completed && startBlockDrag(e, t)}
+                                onPointerDown={(e) => startBlockDrag(e, t)}
                                 title={
                                   canPlace(t, key, hour)
                                     ? undefined
@@ -1769,20 +1826,115 @@ export default function App() {
         />
       )}
 
-      {scheduleTask && (
-        <Modal close={() => setScheduleTask(null)}>
+      {sheet && sheetItem && (
+        <Modal close={() => setSheet(null)}>
           <div className="modal-head">
             <div>
-              <small>Choose a time</small>
-              <h2>Schedule “{scheduleTask.title}”</h2>
+              <small>
+                {sheetOnCal
+                  ? `${dayName(sheetItem.date!, todayKey)} · ${hourLabel(sheetItem.hour!)}${sheetItem.completed ? " · Done" : ""}`
+                  : "Choose a time"}
+              </small>
+              <h2>{sheetOnCal ? sheetItem.text : `Schedule “${sheetItem.text}”`}</h2>
             </div>
             <Button
               aria-label="Close"
               className="icon-button"
               icon="close"
-              onClick={() => setScheduleTask(null)}
+              onClick={() => setSheet(null)}
             />
           </div>
+          {sheetOnCal && (
+            <form
+              className="modal-form sheet-rename"
+              onSubmit={(e) => {
+                e.preventDefault()
+                const title = sheetTitle.trim()
+                if (!title || title === sheetItem.text) return
+                patchSheetItem((n) => ({ ...n, text: title }))
+                setToast("Renamed")
+              }}
+            >
+              <input
+                aria-label="Name"
+                onChange={(e) => setSheetTitle(e.target.value)}
+                value={sheetTitle}
+              />
+              {sheetTitle.trim() && sheetTitle.trim() !== sheetItem.text && (
+                <Button className="primary" type="submit">
+                  Rename
+                </Button>
+              )}
+            </form>
+          )}
+          <div className="sheet-opts">
+            <button
+              aria-label={`Project: ${sheetProject?.name || "none"}. Tap for the next project.`}
+              className={`modal-tag ${sheetProject?.color || "untagged"}`}
+              onClick={() => {
+                const index = tags.findIndex((tag) => tag.id === sheetTagId)
+                const next = index + 1 < tags.length ? tags[index + 1].id : null
+                if (sheetOnCal) patchSheetItem((n) => ({ ...n, tagId: next }))
+                else setSheet({ ...sheet, tagId: next })
+              }}
+              type="button"
+            >
+              <span>{sheetProject?.name || "No project"}</span>
+              <small>Tap to change</small>
+            </button>
+            <div aria-label="Length" className="day-toggle len-toggle" role="group">
+              {[15, 30, 60, 120].map((m) => (
+                <button
+                  aria-pressed={sheetDuration === m}
+                  className={sheetDuration === m ? "active" : ""}
+                  key={m}
+                  onClick={() => {
+                    if (sheetOnCal) patchSheetItem((n) => ({ ...n, duration: m }))
+                    else setSheet({ ...sheet, duration: m })
+                  }}
+                  type="button"
+                >
+                  {m < 60 ? `${m}m` : `${m / 60}h`}
+                </button>
+              ))}
+            </div>
+          </div>
+          {sheetOnCal && (
+            <div className="sheet-actions">
+              <Button
+                className="primary"
+                icon="check"
+                onClick={() => {
+                  if (sheetItem.completed) {
+                    patchSheetItem((n) => {
+                      const back = { ...n, completed: false }
+                      delete back.completedAt
+                      return back
+                    })
+                    setToast("Not done yet")
+                  } else toggle(sheetItem.id)
+                  setSheet(null)
+                }}
+              >
+                {sheetItem.completed ? "Not done" : "Done"}
+              </Button>
+              <Button className="ghost" onClick={() => unschedule(sheetItem.id)}>
+                Back to Park
+              </Button>
+              <button
+                className={`delete-task ${confirmDelete ? "confirm" : ""}`}
+                onClick={() => {
+                  if (!confirmDelete) return setConfirmDelete(true)
+                  deleteTask(sheetItem.id)
+                  setSheet(null)
+                }}
+                type="button"
+              >
+                {confirmDelete ? "Tap again to delete" : "Delete"}
+              </button>
+            </div>
+          )}
+          {sheetOnCal && <small className="sheet-label">Move to</small>}
           <div className="day-toggle" role="tablist">
             {calDays.map((key) => (
               <button
@@ -1802,28 +1954,33 @@ export default function App() {
               .filter((hour) => scheduleDay !== todayKey || hour >= now.getHours())
               .map((hour) => {
                 const project = slotProject(scheduleDay, hour)
-                const ok = canPlace(scheduleTask, scheduleDay, hour)
+                const ok = canPlace({ tagId: sheetTagId }, scheduleDay, hour)
+                const here = sheetOnCal && sheetItem.date === scheduleDay && sheetItem.hour === hour
                 const count = scheduled.filter(
-                  (t) => t.date === scheduleDay && t.hour === hour,
+                  (t) => t.date === scheduleDay && t.hour === hour && t.id !== sheetItem.id,
                 ).length
                 return (
                   <button
                     className={`${project ? `has-project ${project.color}` : ""} ${ok ? "" : "no"}`}
-                    disabled={!ok}
+                    disabled={!ok || here}
                     key={hour}
-                    onClick={() => schedule(scheduleTask.id, scheduleDay, hour)}
+                    onClick={() =>
+                      schedule(sheetItem.id, scheduleDay, hour, sheetOnCal ? {} : { duration: sheet.duration, tagId: sheet.tagId })
+                    }
                     type="button"
                   >
                     <strong>{hourLabel(hour)}</strong>
                     <small>
-                      {project
-                        ? ok
-                          ? `${project.name} hour`
-                          : `Outlined for ${project.name}`
-                        : "Open"}
+                      {here
+                        ? "Here now"
+                        : project
+                          ? ok
+                            ? `${project.name} hour`
+                            : `Outlined for ${project.name}`
+                          : "Open"}
                       {count ? ` · ${count} planned` : ""}
                     </small>
-                    {ok && <Icon name="right" size={16} />}
+                    {ok && !here && <Icon name="right" size={16} />}
                   </button>
                 )
               })}
@@ -1845,7 +2002,7 @@ export default function App() {
             />
           </div>
           <p className="modal-copy">
-            This creates a task in your list and schedules it here.
+            It goes straight onto your calendar.
           </p>
           <form className="modal-form" onSubmit={(e) => add(e, createSlot)}>
             <label htmlFor="scheduled-task">What do you want to work on?</label>
@@ -2017,7 +2174,7 @@ export default function App() {
                 // Resetting must not wipe the synced copy, so disconnect first.
                 if (sync.connected) sync.disconnect()
                 setTags(starterTags)
-                setItems(withDates(seed).map((task) => fromTask(task)))
+                setItems(sampleItems())
                 setOutlines({})
                 setReviews({})
                 setDepth("outline")

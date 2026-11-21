@@ -100,7 +100,7 @@ export function scheduleNote(
   duration: number,
   slot?: { date: string; hour: number },
 ): Note {
-  const next: Note = { ...note, tagId, duration, completed: false }
+  const next: Note = { ...note, tagId, duration, completed: !!note.completed }
   delete next.doneAt
   if (slot) {
     next.date = slot.date
@@ -156,4 +156,21 @@ export function readItems(saved: string | null, today: string): Note[] | null {
   } catch {
     return []
   }
+}
+
+/** Back to Park: the same note without a length or a time. */
+export function parkItem(note: Note): Note {
+  const next: Note = { id: note.id, text: note.text, tagId: note.tagId ?? null, createdAt: note.createdAt }
+  return next
+}
+
+/** Notes with a length but no time go back to Park (there is no task list). */
+export function parkUnscheduled(all: Note[]): Note[] {
+  let changed = false
+  const next = all.map((note) => {
+    if (!isTaskItem(note) || note.hour !== undefined) return note
+    changed = true
+    return parkItem(note)
+  })
+  return changed ? next : all
 }

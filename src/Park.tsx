@@ -376,26 +376,34 @@ export function NotesTray({
   )
 }
 
-/** Parked notes in the Planner: give each a project and a length, then make it a task. */
+/** Parked notes in the Planner: give each a project and a length, then pick a time (or drag it onto the calendar). */
 export function ParkedToTasks({
   notes,
   tags,
   onMake,
+  onDragStart,
+  bare = false,
 }: {
   notes: Note[]
   tags: Tag[]
   onMake: (id: number, tagId: string | null, duration: number) => void
+  /** Long-press (touch) or drag (mouse) a row onto the calendar. */
+  onDragStart?: (e: React.PointerEvent, id: number, duration: number, tagId: string | null) => void
+  /** No fold-away header: the panel around it already says "Parked". */
+  bare?: boolean
 }) {
   const [lengths, setLengths] = useState<Record<number, number>>({})
   const [projects, setProjects] = useState<Record<number, string | null>>({})
   const [open, setOpen] = useState(true)
-  if (!notes.length) return null
+  if (!notes.length)
+    return bare ? <p className="parked-empty">Nothing parked. Park a thought above.</p> : null
   // Notes already sorted on the Outline come first.
   const sorted = [...notes].sort((a, b) => Number(!a.tagId) - Number(!b.tagId))
   const LENGTHS = [15, 30, 60, 120]
   const label = (m: number) => (m < 60 ? `${m}m` : `${m / 60}h`)
   return (
-    <section className={open ? "parked-tasks open" : "parked-tasks"}>
+    <section className={`${open || bare ? "parked-tasks open" : "parked-tasks"}${bare ? " bare" : ""}`}>
+      {!bare && (
       <button
         aria-controls="parked-rows"
         aria-expanded={open}
@@ -406,14 +414,19 @@ export function ParkedToTasks({
         <span>From parked · {notes.length}</span>
         <Icon name={open ? "left" : "right"} size={12} />
       </button>
-      {open && (
+      )}
+      {(open || bare) && (
         <ul className="parked-rows" id="parked-rows">
           {sorted.map((note) => {
             const tagId = note.id in projects ? projects[note.id] : note.tagId ?? null
             const project = tags.find((tag) => tag.id === tagId)
             const length = lengths[note.id] || 30
             return (
-              <li className="parked-row" key={note.id}>
+              <li
+                className={`parked-row${onDragStart ? " draggable" : ""}`}
+                key={note.id}
+                onPointerDown={onDragStart && ((e) => onDragStart(e, note.id, length, tagId))}
+              >
                 <button
                   aria-label={`Project: ${project?.name || "none"}. Tap for the next project.`}
                   className={`parked-dot ${project?.color || "none"}`}
